@@ -14,7 +14,7 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
-@SpringBootTest
+@SpringBootTest(properties = "spring.kafka.listener.auto-startup=false")
 @AutoConfigureMockMvc
 public class LoadControllerIntegrationTest {
 
@@ -35,7 +35,7 @@ public class LoadControllerIntegrationTest {
 
         mvc.perform(get("/BTCUSDT/1697068382000/1697068502000"))
                 .andExpect(status().isOk())
-                .andExpect(content().string(containsString("2 records were inserted")));
+                .andExpect(content().string(containsString("2 records were sent to Kafka")));
 
         Mockito.verify(binanceService).load(symbol, startTime, endTime);
     }

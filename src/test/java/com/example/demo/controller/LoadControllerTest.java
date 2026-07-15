@@ -32,7 +32,7 @@ public class LoadControllerTest {
                 controller.load(symbol, startTime, endTime);
 
         Assertions.assertEquals(200, response.getStatusCode().value());
-        Assertions.assertEquals("2 records were inserted", response.getBody());
+        Assertions.assertEquals("2 records were sent to Kafka", response.getBody());
 
         Mockito.verify(binanceService).load(symbol, startTime, endTime);
     }

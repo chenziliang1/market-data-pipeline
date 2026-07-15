@@ -18,6 +18,6 @@ public class LoadController {
             @PathVariable Long startTime,
             @PathVariable Long endTime) {
         int totalSaved = binanceService.load(symbol, startTime, endTime);
-        return ResponseEntity.ok(totalSaved + " records were inserted");
+        return ResponseEntity.ok(totalSaved + " records were sent to Kafka");
     }
 }

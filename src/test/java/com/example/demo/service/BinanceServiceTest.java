@@ -1,7 +1,6 @@
 package com.example.demo.service;
 
 import com.example.demo.entity.TradeData;
-import com.example.demo.mapper.TradeDataMapper;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
@@ -14,7 +13,10 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.client.RestTemplate;
 
+import java.io.ByteArrayOutputStream;
+import java.io.PrintStream;
 import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 
 import static org.mockito.ArgumentMatchers.anyString;
@@ -25,7 +27,7 @@ import static org.mockito.Mockito.*;
 public class BinanceServiceTest {
 
     @Mock
-    private TradeDataMapper tradeDataMapper;
+    private TradeDataProducer tradeDataProducer;
 
     @Mock
     private RestTemplate restTemplate;
@@ -79,7 +81,7 @@ public class BinanceServiceTest {
         ArgumentCaptor<TradeData> captor =
                 ArgumentCaptor.forClass(TradeData.class);
 
-        verify(tradeDataMapper, times(2)).insertTradeData(captor.capture());
+        verify(tradeDataProducer, times(2)).send(captor.capture());
 
         List<TradeData> savedData = captor.getAllValues();
         TradeData first = savedData.get(0);
@@ -112,7 +114,7 @@ public class BinanceServiceTest {
         int result = binanceService.load(symbol, startTime, endTime);
 
         Assertions.assertEquals(0, result);
-        verify(tradeDataMapper, never()).insertTradeData(any());
+        verify(tradeDataProducer, never()).send(any());
     }
 
     @Test
@@ -120,13 +122,22 @@ public class BinanceServiceTest {
         String symbol = "BTCUSDT";
         Long startTime = 1697068382000L;
         Long endTime = startTime + 60000L;
+        ByteArrayOutputStream errorOutput = new ByteArrayOutputStream();
+        PrintStream originalError = System.err;
 
         when(restTemplate.getForEntity(anyString(), eq(String.class)))
                 .thenReturn(ResponseEntity.ok("invalid json"));
 
-        int result = binanceService.load(symbol, startTime, endTime);
+        int result;
+        try {
+            System.setErr(new PrintStream(errorOutput));
+            result = binanceService.load(symbol, startTime, endTime);
+        } finally {
+            System.setErr(originalError);
+        }
 
         Assertions.assertEquals(0, result);
-        verify(tradeDataMapper, never()).insertTradeData(any());
+        Assertions.assertFalse(errorOutput.toString(StandardCharsets.UTF_8).contains("JsonParseException"));
+        verify(tradeDataProducer, never()).send(any());
     }
 }

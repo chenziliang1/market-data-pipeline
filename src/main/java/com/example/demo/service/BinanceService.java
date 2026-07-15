@@ -1,14 +1,12 @@
 package com.example.demo.service;
 
 import com.example.demo.entity.TradeData;
-import com.example.demo.mapper.TradeDataMapper;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.springframework.beans.factory.annotation.Autowired;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Service;
-import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.client.RestTemplate;
 
 import java.math.BigDecimal;
@@ -20,84 +18,78 @@ import java.util.stream.StreamSupport;
 @Service
 public class BinanceService {
 
-    @Autowired
-    private TradeDataMapper tradeDataMapper; //注入 MyBatis的Mapper，用于后续将数据写入数据库
+    private static final Logger logger = LoggerFactory.getLogger(BinanceService.class);
 
-    @Autowired
-    private RestTemplate restTemplate;
+    private final TradeDataProducer tradeDataProducer;
+    private final RestTemplate restTemplate;
+    private final ObjectMapper mapper;
 
-    @Autowired
-    private ObjectMapper mapper;
-
-    public int load(
-            String symbol,
-            Long startTime,
-            Long endTime) {
-
-        int maxPerRequest = 1000;
-        long oneMinuteMs = 60000L; // 1 minute in milliseconds
-        int totalRequired = (int)((endTime - startTime) / oneMinuteMs);
-
-        // Calculate how many parallel API calls we need to make (1400 / 1000 = 2 requests)
-        int numberOfRequests = (int) Math.ceil((double) totalRequired / maxPerRequest);
-
-
-        // create an integer stream from 0 to numberOfRequests - 1
-        int totalSaved = IntStream.range(0, numberOfRequests)
-                .parallel() // convert normal stream to parallel stream, it can improve the efficiency
-                .map(chunkIndex -> { // map each batch index(chuckindex)
-
-                    return count(symbol, startTime, endTime, chunkIndex);
-                })
-                .sum(); // Combine the results of all parallel threads
-        // 返回HTTP 200并且附带总共插入成功的记录数
-        //            return ResponseEntity.ok(totalSaved + " records were inserted");
-        return totalSaved;
-
-
+    public BinanceService(
+            TradeDataProducer tradeDataProducer,
+            RestTemplate restTemplate,
+            ObjectMapper mapper) {
+        this.tradeDataProducer = tradeDataProducer;
+        this.restTemplate = restTemplate;
+        this.mapper = mapper;
     }
 
-    private int count(String symbol,
-                      Long startTime,
-                      Long endTime,
-                      int chunkIndex){
+    public int load(String symbol, Long startTime, Long endTime) {
         int maxPerRequest = 1000;
-        long oneMinuteMs = 60000L; // 1 minute in milliseconds
-        int totalRequired = (int)((endTime - startTime) / oneMinuteMs);
-        // Calculate how many parallel API calls we need to make (1400 / 1000 = 2 requests)
+        long oneMinuteMs = 60000L;
+        int totalRequired = (int) ((endTime - startTime) / oneMinuteMs);
         int numberOfRequests = (int) Math.ceil((double) totalRequired / maxPerRequest);
+
+        return IntStream.range(0, numberOfRequests)
+                .parallel()
+                .map(chunkIndex -> count(symbol, startTime, endTime, chunkIndex))
+                .sum();
+    }
+
+    private int count(String symbol, Long startTime, Long endTime, int chunkIndex) {
+        int maxPerRequest = 1000;
+        long oneMinuteMs = 60000L;
+        int totalRequired = (int) ((endTime - startTime) / oneMinuteMs);
+        int numberOfRequests = (int) Math.ceil((double) totalRequired / maxPerRequest);
+
         int limitForThisRequest = (chunkIndex == numberOfRequests - 1)
                 ? totalRequired - (chunkIndex * maxPerRequest)
                 : maxPerRequest;
 
-        // Pre-calculate the startTime for this specific API call
         long batchStartTime = startTime + (chunkIndex * maxPerRequest * oneMinuteMs);
 
-        String feeResourceUrl = "https://www.binance.us/api/v3/klines?symbol=" + symbol +
-                "&startTime=" + batchStartTime + "&endTime=" + endTime +
-                "&interval=1m&limit=" + limitForThisRequest;
+        String feeResourceUrl = "https://www.binance.us/api/v3/klines?symbol=" + symbol
+                + "&startTime=" + batchStartTime
+                + "&endTime=" + endTime
+                + "&interval=1m&limit=" + limitForThisRequest;
 
-        // restTemplate:访问REST服务的客户端工具; getForEntity:获取完整HTTP实体的请求
         ResponseEntity<String> response = restTemplate.getForEntity(feeResourceUrl, String.class);
 
         try {
             JsonNode rootNode = mapper.readTree(response.getBody());
 
             if (rootNode != null && rootNode.isArray() && !rootNode.isEmpty()) {
-                // 3. PARALLEL PARSE: Map JSON to objects inside each thread
-                List<TradeData> batchData = StreamSupport.stream(rootNode.spliterator(), false)//把json数组转换成java stream,并且开启串行流（单线程）
-                        .map(klineNode -> mapToTradeData(klineNode, symbol, batchStartTime, endTime))//把json数组转换成TradeData
-                        .collect(Collectors.toList());//打包成list
+                List<TradeData> batchData = StreamSupport.stream(rootNode.spliterator(), false)
+                        .map(klineNode -> mapToTradeData(klineNode, symbol, batchStartTime, endTime))
+                        .collect(Collectors.toList());
 
-                // 4. SAVE: Insert into the database
-                batchData.forEach(tradeDataMapper::insertTradeData);
+                batchData.forEach(tradeDataProducer::send);
 
-                return batchData.size(); // Return records saved in this thread
+                return batchData.size();
             }
         } catch (Exception e) {
-            e.printStackTrace();
+            String errorMessage = e.getMessage() == null
+                    ? e.getClass().getSimpleName()
+                    : e.getMessage().split("\\R", 2)[0];
+            logger.warn(
+                    "Failed to parse Binance response for symbol {} from {} to {}: {}",
+                    symbol,
+                    batchStartTime,
+                    endTime,
+                    errorMessage
+            );
         }
-        return 0; // Return 0 if something failed in this thread
+
+        return 0;
     }
 
     private TradeData mapToTradeData(JsonNode klineNode, String symbol, Long startTime, Long endTime) {
