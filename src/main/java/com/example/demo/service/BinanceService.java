@@ -57,7 +57,7 @@ public class BinanceService {
 
         long batchStartTime = startTime + (chunkIndex * maxPerRequest * oneMinuteMs);
 
-        String feeResourceUrl = "https://www.binance.us/api/v3/klines?symbol=" + symbol
+        String feeResourceUrl = "https://api.binance.us/api/v3/klines?symbol=" + symbol
                 + "&startTime=" + batchStartTime
                 + "&endTime=" + endTime
                 + "&interval=1m&limit=" + limitForThisRequest;
