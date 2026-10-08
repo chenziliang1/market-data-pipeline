@@ -4,8 +4,9 @@ import java.time.LocalDate;
 import java.util.List;
 
 /**
- * Result of comparing stored daily aggregates with the exchange's own daily candles.
- * {@code discrepancies} lists every day that did not match; matching days are only counted.
+ * Result of comparing stored daily aggregates with the exchange's own daily candles, and the
+ * served daily rollups with the minute candles they summarize.
+ * {@code discrepancies} lists every problem found; matching days are only counted.
  */
 public record DailyReconciliationReport(
         String symbol,
@@ -16,6 +17,7 @@ public record DailyReconciliationReport(
         int mismatchedDays,
         int incompleteDays,
         int missingOnExchangeDays,
+        int rollupMismatchedDays,
         List<DayDiscrepancy> discrepancies) {
 
     public enum Status {
@@ -24,7 +26,9 @@ public record DailyReconciliationReport(
         /** Fewer than 1,440 minute candles are stored, so the day is not compared. */
         INCOMPLETE,
         /** The exchange returned no daily candle for the day. */
-        MISSING_ON_EXCHANGE
+        MISSING_ON_EXCHANGE,
+        /** The daily rollup that queries are served from differs from its minute candles. */
+        ROLLUP_MISMATCH
     }
 
     public record DayDiscrepancy(
@@ -34,9 +38,13 @@ public record DailyReconciliationReport(
             List<FieldDifference> differences) {
     }
 
+    /**
+     * For {@link Status#MISMATCH}, {@code expected} is the exchange's value; for
+     * {@link Status#ROLLUP_MISMATCH}, it is the value recomputed from the minute candles.
+     */
     public record FieldDifference(
             String field,
             String stored,
-            String exchange) {
+            String expected) {
     }
 }

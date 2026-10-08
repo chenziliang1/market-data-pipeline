@@ -4,6 +4,7 @@ import com.example.demo.dto.DailyReconciliationReport;
 import com.example.demo.entity.AggregatedTradeData;
 import com.example.demo.entity.AggregationPeriod;
 import com.example.demo.entity.TradeData;
+import com.example.demo.mapper.AggregationMapper;
 import com.example.demo.service.AggregationService;
 import com.example.demo.service.DailyReconciliationService;
 import com.example.demo.service.TradeDataProducer;
@@ -21,16 +22,15 @@ import org.apache.kafka.common.serialization.StringDeserializer;
 import org.apache.kafka.common.serialization.StringSerializer;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
+import org.assertj.core.api.recursive.comparison.RecursiveComparisonConfiguration;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.core.io.FileSystemResource;
 import org.springframework.data.redis.core.RedisCallback;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.datasource.init.ScriptUtils;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.web.client.ExpectedCount;
@@ -45,7 +45,6 @@ import org.testcontainers.utility.DockerImageName;
 
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
-import java.sql.Connection;
 import java.time.Duration;
 import java.time.LocalDate;
 import java.time.ZoneOffset;
@@ -73,7 +72,7 @@ class PipelineIntegrationTest {
     private static final String DEAD_LETTER_TOPIC = TOPIC + ".DLT";
     private static final String SYMBOL = "BTCUSDT";
     private static final long MINUTE = 60_000L;
-    /** 2023-11-14T21:00:00Z, aligned to an hour boundary. */
+    /** 2023-11-14T22:00:00Z, aligned to an hour boundary. */
     private static final long HOUR_START = 1_699_999_200_000L;
     private static final long HOUR_END = HOUR_START + 60 * MINUTE;
 
@@ -120,11 +119,15 @@ class PipelineIntegrationTest {
     private DailyReconciliationService reconciliationService;
 
     @Autowired
+    private AggregationMapper aggregationMapper;
+
+    @Autowired
     @Qualifier("restTemplate")
     private RestTemplate restTemplate;
 
+    /** The schema itself is created by the Flyway migrations when the application starts. */
     @BeforeAll
-    static void createSchemaAndTopics() throws Exception {
+    static void createTopics() throws Exception {
         // One partition, so records are consumed in the order they were published.
         try (AdminClient admin = AdminClient.create(Map.of(
                 AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, KAFKA.getBootstrapServers()))) {
@@ -132,15 +135,12 @@ class PipelineIntegrationTest {
                     new NewTopic(TOPIC, 1, (short) 1),
                     new NewTopic(DEAD_LETTER_TOPIC, 1, (short) 1))).all().get();
         }
-
-        try (Connection connection = POSTGRES.createConnection("")) {
-            ScriptUtils.executeSqlScript(connection, new FileSystemResource("db/schema.sql"));
-        }
     }
 
     @BeforeEach
     void cleanState() {
         jdbc.update("DELETE FROM newtable");
+        jdbc.update("DELETE FROM candle_rollup");
         flushRedis();
     }
 
@@ -355,6 +355,9 @@ class PipelineIntegrationTest {
                                       volume, close_time, nums_of_trade, symbol)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, minutes);
+        // Inserted behind the consumer's back, so build the rollups the consumer would have written.
+        aggregationMapper.refreshRollups(SYMBOL, "hour", 3_600_000L, dayStart, dayStart + 86_400_000L);
+        aggregationMapper.refreshRollups(SYMBOL, "day", 86_400_000L, dayStart, dayStart + 86_400_000L);
 
         // The exchange's own daily candle for the same day: open of the first minute, close of the last.
         String exchangeDaily = "[[%d,\"100\",\"1540\",\"99\",\"1539.5\",\"720.00000000\",%d,\"0\",2880]]"
@@ -368,17 +371,70 @@ class PipelineIntegrationTest {
         assertThat(clean.matchedDays()).isEqualTo(1);
         assertThat(clean.discrepancies()).isEmpty();
 
-        // Plant a wrong close on the last minute of the day; the oracle must notice.
+        // Plant a wrong close on the last minute of the day, without touching the rollup.
+        // Both layers must notice: the minutes disagree with the exchange, and the rollup with the minutes.
         jdbc.update("UPDATE newtable SET close_price = 0 WHERE symbol = ? AND open_time = ?",
                 SYMBOL, dayStart + 1439 * MINUTE);
 
         DailyReconciliationReport corrupted = reconciliationService.reconcile(SYMBOL, day, day);
         assertThat(corrupted.mismatchedDays()).isEqualTo(1);
-        assertThat(corrupted.discrepancies()).singleElement().satisfies(discrepancy ->
+        assertThat(corrupted.rollupMismatchedDays()).isEqualTo(1);
+        assertThat(corrupted.discrepancies())
+                .extracting(DailyReconciliationReport.DayDiscrepancy::status)
+                .containsExactlyInAnyOrder(
+                        DailyReconciliationReport.Status.MISMATCH, DailyReconciliationReport.Status.ROLLUP_MISMATCH);
+        assertThat(corrupted.discrepancies()).allSatisfy(discrepancy ->
                 assertThat(discrepancy.differences())
                         .extracting(DailyReconciliationReport.FieldDifference::field)
                         .containsExactly("close"));
         exchange.verify();
+    }
+
+    @Test
+    void rollupsMatchMinuteCandlesAfterCorrectionsAndOutOfOrderDelivery() {
+        long dayEnd = HOUR_START + 2 * 60 * MINUTE; // 2023-11-15T00:00:00Z
+        producer.send(candle(SYMBOL, dayEnd + MINUTE, "30", "31", "29", "30", "1", 1));
+        producer.send(candle(SYMBOL, dayEnd - MINUTE, "20", "21", "19", "20", "1", 1));
+        producer.send(candle(SYMBOL, HOUR_START, "10", "11", "9", "10", "1", 1));
+        producer.send(candle(SYMBOL, dayEnd, "0", "0", "0", "0", "0", 0)); // no trades
+        producer.send(candle(SYMBOL, dayEnd - MINUTE, "25", "26", "24", "25", "2", 2)); // correction
+        awaitConsumed();
+
+        long from = dayEnd - 86_400_000L;
+        long to = dayEnd + 86_400_000L;
+        RecursiveComparisonConfiguration byValue = RecursiveComparisonConfiguration.builder()
+                .withComparatorForType(BigDecimal::compareTo, BigDecimal.class)
+                .build();
+        for (AggregationPeriod period : AggregationPeriod.values()) {
+            List<AggregatedTradeData> fromMinutes =
+                    aggregationMapper.findAggregated(SYMBOL, from, to, period.getPostgresValue());
+            List<AggregatedTradeData> fromRollups =
+                    aggregationMapper.findRollups(SYMBOL, from, to, period.getPostgresValue());
+
+            assertThat(fromRollups).as(period.name())
+                    .usingRecursiveFieldByFieldElementComparator(byValue)
+                    .containsExactlyElementsOf(fromMinutes);
+        }
+        AggregatedTradeData firstDay = aggregationMapper.findRollups(SYMBOL, from, dayEnd, "day").get(0);
+        assertThat(firstDay.getClosePrice()).as("the correction reached the daily rollup").isEqualByComparingTo("25");
+        assertThat(firstDay.getCandleCount()).isEqualTo(2L);
+    }
+
+    @Test
+    void rangeNotAlignedToBucketsCountsOnlyMinutesInsideIt() throws Exception {
+        for (long offset : new long[]{1, 2, 3, 65, 121, 123}) {
+            producer.send(candle(SYMBOL, HOUR_START + offset * MINUTE, "1", "1", "1", "1", "1", 1));
+        }
+        awaitConsumed();
+
+        // [22:02, 00:02): a partial hour, a whole hour served from the rollup, then another partial hour.
+        List<AggregatedTradeData> rows = aggregationService.getAggregated(
+                SYMBOL, HOUR_START + 2 * MINUTE, HOUR_START + 122 * MINUTE, AggregationPeriod.HOURLY);
+
+        assertThat(rows).extracting(AggregatedTradeData::getBucketStartTime)
+                .containsExactly(HOUR_START, HOUR_END, HOUR_END + 60 * MINUTE);
+        assertThat(rows).extracting(AggregatedTradeData::getCandleCount).containsExactly(2L, 1L, 1L);
+        assertThat(rows).extracting(AggregatedTradeData::getExpectedCandleCount).containsExactly(58L, 60L, 2L);
     }
 
     /**

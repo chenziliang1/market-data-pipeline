@@ -12,6 +12,8 @@ Tradedate 是一个基于 Java 17 和 Spring Boot 3.5.11 的比特币行情数�
 - consumer 以批量方式消费：每次 poll（最多 `KAFKA_MAX_POLL_RECORDS` 条，默认 500）用一条多行 upsert 写入。同一批里同一根 K 线出现多次时保留最后一个版本。
 - 消费失败的记录按指数退避重试，仍失败则写入死信 topic；无法反序列化或被数据库拒绝（如违反约束）的记录不重试，直接进入死信 topic。批量写入失败时会逐行重试找出那一条，同批其他记录照常写入，不会卡住分区。
 - 查询 `HOURLY` 或 `DAILY` 聚合结果，每个桶附带实际/应有的分钟数和是否完整；结果通过 Redis cache-aside 缓存，新数据写入后相关缓存自动失效。
+- 小时和日 K 线预聚合在 `candle_rollup` 表中，由 consumer 在写入分钟 K 线的同一个事务里更新；查询整桶直接读预聚合，只有区间两端不完整的桶才从分钟数据现算。
+- 数据库结构由 Flyway 迁移脚本管理，应用启动时自动执行。
 - 拉取接口和管理接口需要 `X-API-Key`；没有配置密钥时拒绝请求，而不是放行。
 - 使用 Docker Compose 启动应用、单节点 Kafka 和 Redis。
 - 可选启用 Kimi 交互式终端，查询已结束的单个 UTC 日期。
@@ -90,13 +92,12 @@ APP_API_KEY=YOUR_RANDOM_KEY
 
 ### 2. 初始化数据库
 
-对新数据库执行 [`db/schema.sql`](db/schema.sql)。可以在 DBeaver 中打开并执行，也可以使用 `psql`：
+不需要手动建表。应用启动时，Flyway 会执行 [`src/main/resources/db/migration`](src/main/resources/db/migration) 下的迁移脚本：
 
-```bash
-psql "host=YOUR_DATABASE_HOST port=5432 dbname=YOUR_DATABASE user=YOUR_DATABASE_USERNAME sslmode=require" -f db/schema.sql
-```
+- `V1__trade_data.sql`：分钟 K 线表 `newtable` 和 `(symbol, open_time)` 唯一索引。该索引是 Kafka 重复投递时 `ON CONFLICT` 幂等写入所必需的。
+- `V2__candle_rollups.sql`：小时和日预聚合表 `candle_rollup`，并用已有的分钟数据回填。
 
-脚本会创建应用使用的 `newtable` 和 `(symbol, open_time)` 唯一索引。该索引是 Kafka 重复投递时 `ON CONFLICT` 幂等写入所必需的。
+引入 Flyway 之前就已经建好表的数据库（有表、没有 Flyway 历史表）会被记为版本 0；`V1` 全部使用 `IF NOT EXISTS`，在这种数据库上不做任何改动，之后的迁移照常执行。数据库用户需要有建表权限。
 
 ### 3. 构建并启动
 
@@ -149,9 +150,21 @@ Invoke-RestMethod "http://localhost:8080/api/aggregates/HOURLY/BTCUSDT/$start/$e
 | 逐条写入 | 162.0 秒 | 约 3,250 行/秒 |
 | 每次 poll 一条多行 upsert | 约 10.5 秒（两次 10.7 / 10.4） | 约 50,000 行/秒 |
 
+加上预聚合后，consumer 在同一个事务里还要更新受影响的小时和日预聚合，吞吐下降约 25%（同样条件下两次 13.6 / 14.3 秒，未加预聚合的版本两次 10.5 / 11.5 秒）。换来的是查询（本机，Redis 缓存未命中，各 15 次取中位数，两个版本返回的结果完全相同）：
+
+| 查询 2024 全年 | 从分钟数据现算 | 读预聚合 |
+| --- | --- | --- |
+| 366 个日 K 线 | 约 487 ms | 约 6.7 ms |
+| 8,784 个小时 K 线 | 约 459 ms | 约 21 ms |
+
 改成批量写入后，拉取全年数据时 consumer 已能跟上 Binance.US 的拉取速度：接口返回时（约 27 秒）数据已全部落库，之前要约 190 秒。数据库在远端（如 RDS）时每条语句多一次网络往返，实际数字会不同。
 
-对账接口只比较存满 1,440 分钟的日子；分钟数不足的记为 `INCOMPLETE`，不参与比较。数值按值比较（`1.5` 等于 `1.50000000`），成交笔数必须完全相等。返回的 `discrepancies` 只列出没有对上的日子及其不一致的字段。例如核对 2024 全年：
+对账接口同时检查两层：
+
+- 分钟数据按 UTC 日聚合后，和交易所自己的日线逐字段比较。只比较存满 1,440 分钟的日子；分钟数不足的记为 `INCOMPLETE`，不参与比较。数值按值比较（`1.5` 等于 `1.50000000`），成交笔数必须完全相等。不一致记为 `MISMATCH`。
+- 查询实际使用的日预聚合，和同一天的分钟数据聚合结果比较。不一致记为 `ROLLUP_MISMATCH`，说明预聚合和分钟数据脱节了。
+
+返回的 `discrepancies` 只列出有问题的日子及其不一致的字段（`stored` 是库里的值，`expected` 是交易所的值或由分钟数据算出的值）。例如核对 2024 全年：
 
 ```powershell
 Invoke-RestMethod "http://localhost:8080/api/reconciliation/daily/BTCUSDT/2024-01-01/2024-12-31"
@@ -261,7 +274,7 @@ macOS/Linux：
 测试分两类：
 
 - 单元测试：Binance 响应映射、按交易所时钟过滤未收盘 K 线、重试与输入校验、Kafka 发送失败、对账的分类与校验、数据加载接口、Kimi 请求/响应和数据库完整性条件。
-- 集成测试（`PipelineIntegrationTest`）：用 Testcontainers 启动真实的 Kafka、PostgreSQL 和 Redis，覆盖重复投递幂等、修正 K 线覆盖旧值、乱序投递下的小时聚合、桶完整性、缓存 TTL、新数据写入后缓存失效、畸形消息进入死信 topic 且不阻塞后续消息、被数据库拒绝的一行进入死信 topic 而同批其他行照常写入、同一批里的修正版覆盖原版，以及对账能发现被故意改坏的一根 K 线。
+- 集成测试（`PipelineIntegrationTest`）：用 Testcontainers 启动真实的 Kafka、PostgreSQL 和 Redis，数据库结构由 Flyway 迁移创建，覆盖预聚合在修正和乱序投递后仍与分钟数据一致、不对齐的查询区间只统计区间内的分钟、重复投递幂等、修正 K 线覆盖旧值、乱序投递下的小时聚合、桶完整性、缓存 TTL、新数据写入后缓存失效、畸形消息进入死信 topic 且不阻塞后续消息、被数据库拒绝的一行进入死信 topic 而同批其他行照常写入、同一批里的修正版覆盖原版，以及对账能同时发现被故意改坏的一根分钟 K 线和因此脱节的预聚合。
 
 集成测试需要本机运行 Docker；没有 Docker 时会被跳过而不是失败。尚未覆盖交互式终端循环和完整的 Kimi 回退链路。
 

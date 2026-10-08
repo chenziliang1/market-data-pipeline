@@ -1,7 +1,6 @@
 package com.example.demo.service;
 
 import com.example.demo.entity.TradeData;
-import com.example.demo.mapper.TradeDataMapper;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.springframework.core.log.LogAccessor;
 import org.springframework.dao.DataIntegrityViolationException;
@@ -13,12 +12,12 @@ import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 
 /**
- * Writes each Kafka poll with one multi-row upsert instead of one statement per candle.
+ * Writes each Kafka poll with one multi-row upsert instead of one statement per candle, together
+ * with the rollups it affects (see {@link CandleWriter}).
  *
  * <p>When a single record is bad, the records before it are written and
  * {@link BatchListenerFailedException} names the bad one, so the error handler sends only that
@@ -29,11 +28,11 @@ public class TradeDataConsumer {
 
     private static final LogAccessor LOG = new LogAccessor(TradeDataConsumer.class);
 
-    private final TradeDataMapper tradeDataMapper;
+    private final CandleWriter candleWriter;
     private final AggregateCacheVersions cacheVersions;
 
-    public TradeDataConsumer(TradeDataMapper tradeDataMapper, AggregateCacheVersions cacheVersions) {
-        this.tradeDataMapper = tradeDataMapper;
+    public TradeDataConsumer(CandleWriter candleWriter, AggregateCacheVersions cacheVersions) {
+        this.candleWriter = candleWriter;
         this.cacheVersions = cacheVersions;
     }
 
@@ -63,17 +62,17 @@ public class TradeDataConsumer {
         if (pending.isEmpty()) {
             return;
         }
+        // Cache versions are bumped only after the transaction commits; bumping earlier would let a
+        // reader cache the old data under the new version.
         try {
-            bumpVersions(tradeDataMapper.upsertTradeDataBatch(latestVersionOfEachCandle(pending)));
+            candleWriter.writeBatch(latestVersionOfEachCandle(pending)).forEach(cacheVersions::bump);
         } catch (DataIntegrityViolationException batchFailure) {
-            // One bad row fails the whole statement. Retry row by row to find it,
+            // One bad row fails the whole transaction. Retry row by row to find it,
             // so only that record is dead-lettered and the good ones are kept.
             for (int offset = 0; offset < pending.size(); offset++) {
                 TradeData candle = pending.get(offset);
                 try {
-                    if (tradeDataMapper.upsertTradeData(candle) > 0) {
-                        cacheVersions.bump(candle.getSymbol());
-                    }
+                    candleWriter.writeOne(candle).forEach(cacheVersions::bump);
                 } catch (DataIntegrityViolationException rowFailure) {
                     throw new BatchListenerFailedException(
                             "Candle rejected by the database", rowFailure, startIndex + offset);
@@ -95,10 +94,6 @@ public class TradeDataConsumer {
             latest.put(key, candle);
         }
         return new ArrayList<>(latest.values());
-    }
-
-    private void bumpVersions(List<String> changedSymbols) {
-        new LinkedHashSet<>(changedSymbols).forEach(cacheVersions::bump);
     }
 
     private static Exception deserializationFailure(ConsumerRecord<String, TradeData> record) {

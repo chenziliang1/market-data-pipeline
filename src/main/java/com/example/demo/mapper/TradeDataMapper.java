@@ -63,7 +63,7 @@ public interface TradeDataMapper {
      * The batch must not contain the same (symbol, open_time) twice: PostgreSQL rejects a
      * statement that would update the same row twice.
      *
-     * @return the symbol of every row that was inserted or changed
+     * @return the symbol and open time of every row that was inserted or changed
      */
     @Select("""
             <script>
@@ -91,11 +91,18 @@ public interface TradeDataMapper {
                   (EXCLUDED.open_price, EXCLUDED.high_price, EXCLUDED.low_price,
                    EXCLUDED.close_price, EXCLUDED.volume, EXCLUDED.close_time,
                    EXCLUDED.nums_of_trade)
-            RETURNING symbol
+            RETURNING symbol, open_time
             </script>
             """)
     @Options(flushCache = Options.FlushCachePolicy.TRUE)
-    List<String> upsertTradeDataBatch(@Param("candles") List<TradeData> candles);
+    List<TradeData> upsertTradeDataBatch(@Param("candles") List<TradeData> candles);
+
+    /**
+     * Serializes writers of the same symbol until the current transaction ends, so two
+     * transactions never recompute the same rollup from different snapshots of the minute candles.
+     */
+    @Select("SELECT 1 FROM (SELECT pg_advisory_xact_lock(hashtext(#{symbol}))) AS locked")
+    Integer lockSymbol(@Param("symbol") String symbol);
 
     @Select("""
             SELECT COUNT(*) = #{expectedCount}

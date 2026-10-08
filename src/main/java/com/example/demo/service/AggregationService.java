@@ -3,7 +3,6 @@ package com.example.demo.service;
 import com.example.demo.aop.TrackExecutionTime;
 import com.example.demo.entity.AggregatedTradeData;
 import com.example.demo.entity.AggregationPeriod;
-import com.example.demo.mapper.AggregationMapper;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JavaType;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -25,7 +24,7 @@ public class AggregationService {
     private static final Logger logger = LoggerFactory.getLogger(AggregationService.class);
     private static final long ONE_MINUTE_MS = 60_000L;
 
-    private final AggregationMapper aggregationMapper;
+    private final AggregateQuery aggregateQuery;
     private final StringRedisTemplate redis;
     private final ObjectMapper objectMapper;
     private final AggregateCacheVersions cacheVersions;
@@ -35,14 +34,14 @@ public class AggregationService {
     private final JavaType resultType;
 
     public AggregationService(
-            AggregationMapper aggregationMapper,
+            AggregateQuery aggregateQuery,
             StringRedisTemplate redis,
             ObjectMapper objectMapper,
             AggregateCacheVersions cacheVersions,
             Clock clock,
             @Value("${app.cache.aggregate.closed-ttl:PT1H}") Duration closedRangeTtl,
             @Value("${app.cache.aggregate.open-ttl:PT1M}") Duration openRangeTtl) {
-        this.aggregationMapper = aggregationMapper;
+        this.aggregateQuery = aggregateQuery;
         this.redis = redis;
         this.objectMapper = objectMapper;
         this.cacheVersions = cacheVersions;
@@ -86,12 +85,7 @@ public class AggregationService {
         }
 
         long now = clock.millis();
-        List<AggregatedTradeData> result =
-                aggregationMapper.findAggregated(
-                        symbol,
-                        startTime,
-                        endTime,
-                        period.getPostgresValue());
+        List<AggregatedTradeData> result = aggregateQuery.aggregate(symbol, startTime, endTime, period);
         result.forEach(row -> annotateCoverage(row, startTime, endTime, period, now));
 
         if (key != null) {

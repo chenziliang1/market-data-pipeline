@@ -4,6 +4,7 @@ import com.example.demo.dto.DailyOhlcvResponse;
 import com.example.demo.dto.DailyReconciliationReport;
 import com.example.demo.dto.DailyReconciliationReport.Status;
 import com.example.demo.entity.AggregatedTradeData;
+import com.example.demo.entity.AggregationPeriod;
 import com.example.demo.mapper.AggregationMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -38,6 +39,9 @@ class DailyReconciliationServiceTest {
     private AggregationMapper aggregationMapper;
 
     @Mock
+    private AggregateQuery aggregateQuery;
+
+    @Mock
     private BinanceDailyMarketService binanceDailyMarketService;
 
     private DailyReconciliationService service;
@@ -45,16 +49,15 @@ class DailyReconciliationServiceTest {
     @BeforeEach
     void setUp() {
         Clock clock = Clock.fixed(Instant.parse("2026-01-01T00:00:00Z"), ZoneOffset.UTC);
-        service = new DailyReconciliationService(aggregationMapper, binanceDailyMarketService, clock);
+        service = new DailyReconciliationService(aggregationMapper, aggregateQuery, binanceDailyMarketService, clock);
     }
 
     @Test
     void classifiesMatchingMismatchedAndIncompleteDays() {
-        when(aggregationMapper.findAggregated(eq("BTCUSDT"), anyLong(), anyLong(), eq("day")))
-                .thenReturn(List.of(
-                        stored(DAY_1, "100", "1440"),
-                        stored(DAY_2, "100", "1440"),
-                        stored(DAY_3, "100", "1439")));
+        storedDays(List.of(
+                stored(DAY_1, "100", "1440"),
+                stored(DAY_2, "100", "1440"),
+                stored(DAY_3, "100", "1439")));
         when(binanceDailyMarketService.fetchDailyRange(anyString(), anyLong(), anyLong()))
                 .thenReturn(Map.of(
                         startOf(DAY_1), exchange(DAY_1, "100.00000000"),
@@ -75,14 +78,13 @@ class DailyReconciliationServiceTest {
                 .satisfies(difference -> {
                     assertThat(difference.field()).isEqualTo("close");
                     assertThat(difference.stored()).isEqualTo("100");
-                    assertThat(difference.exchange()).isEqualTo("101");
+                    assertThat(difference.expected()).isEqualTo("101");
                 });
     }
 
     @Test
     void reportsDayTheExchangeDidNotReturn() {
-        when(aggregationMapper.findAggregated(eq("BTCUSDT"), anyLong(), anyLong(), eq("day")))
-                .thenReturn(List.of(stored(DAY_1, "100", "1440")));
+        storedDays(List.of(stored(DAY_1, "100", "1440")));
         when(binanceDailyMarketService.fetchDailyRange(anyString(), anyLong(), anyLong()))
                 .thenReturn(Map.of());
 
@@ -95,6 +97,30 @@ class DailyReconciliationServiceTest {
     }
 
     @Test
+    void reportsRollupThatDriftedFromItsMinuteCandles() {
+        when(aggregationMapper.findAggregated(eq("BTCUSDT"), anyLong(), anyLong(), eq("day")))
+                .thenReturn(List.of(stored(DAY_1, "100", "1440")));
+        when(aggregateQuery.aggregate(eq("BTCUSDT"), anyLong(), anyLong(), eq(AggregationPeriod.DAILY)))
+                .thenReturn(List.of(stored(DAY_1, "99", "1440")));
+        when(binanceDailyMarketService.fetchDailyRange(anyString(), anyLong(), anyLong()))
+                .thenReturn(Map.of(startOf(DAY_1), exchange(DAY_1, "100")));
+
+        DailyReconciliationReport report = service.reconcile("BTCUSDT", DAY_1, DAY_1);
+
+        assertThat(report.matchedDays()).isZero();
+        assertThat(report.mismatchedDays()).as("the minute candles match the exchange").isZero();
+        assertThat(report.rollupMismatchedDays()).isEqualTo(1);
+        assertThat(report.discrepancies()).singleElement().satisfies(discrepancy -> {
+            assertThat(discrepancy.status()).isEqualTo(Status.ROLLUP_MISMATCH);
+            assertThat(discrepancy.differences()).singleElement().satisfies(difference -> {
+                assertThat(difference.field()).isEqualTo("close");
+                assertThat(difference.stored()).isEqualTo("99");
+                assertThat(difference.expected()).isEqualTo("100");
+            });
+        });
+    }
+
+    @Test
     void rejectsDaysThatHaveNotEnded() {
         assertThatThrownBy(() -> service.reconcile("BTCUSDT", DAY_1, LocalDate.of(2026, 1, 1)))
                 .isInstanceOf(IllegalArgumentException.class);
@@ -103,7 +129,13 @@ class DailyReconciliationServiceTest {
         assertThatThrownBy(() -> service.reconcile("BTCUSDT", DAY_1, DAY_1.plusDays(366)))
                 .isInstanceOf(IllegalArgumentException.class);
 
-        verifyNoInteractions(aggregationMapper, binanceDailyMarketService);
+        verifyNoInteractions(aggregationMapper, aggregateQuery, binanceDailyMarketService);
+    }
+
+    /** The minute candles and the served rollups agree. */
+    private void storedDays(List<AggregatedTradeData> rows) {
+        when(aggregationMapper.findAggregated(eq("BTCUSDT"), anyLong(), anyLong(), eq("day"))).thenReturn(rows);
+        when(aggregateQuery.aggregate(eq("BTCUSDT"), anyLong(), anyLong(), eq(AggregationPeriod.DAILY))).thenReturn(rows);
     }
 
     private static AggregatedTradeData stored(LocalDate date, String close, String candleCount) {
