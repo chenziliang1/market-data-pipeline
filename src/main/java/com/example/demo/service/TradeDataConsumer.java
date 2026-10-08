@@ -9,13 +9,18 @@ import org.springframework.stereotype.Service;
 public class TradeDataConsumer {
 
     private final TradeDataMapper tradeDataMapper;
+    private final AggregateCacheVersions cacheVersions;
 
-    public TradeDataConsumer(TradeDataMapper tradeDataMapper) {
+    public TradeDataConsumer(TradeDataMapper tradeDataMapper, AggregateCacheVersions cacheVersions) {
         this.tradeDataMapper = tradeDataMapper;
+        this.cacheVersions = cacheVersions;
     }
 
     @KafkaListener(topics = "${app.kafka.topics.trade-data}")
     public void consume(TradeData tradeData) {
-        tradeDataMapper.insertTradeData(tradeData);
+        int changedRows = tradeDataMapper.upsertTradeData(tradeData);
+        if (changedRows > 0) {
+            cacheVersions.bump(tradeData.getSymbol());
+        }
     }
 }

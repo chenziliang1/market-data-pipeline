@@ -33,6 +33,7 @@ public interface AggregationMapper {
                     AS close_price,
                 SUM(volume) AS volume,
                 SUM(nums_of_trade) AS nums_of_trade,
+                COUNT(*) AS candle_count,
                 symbol
             FROM source_rows
             GROUP BY symbol, bucket_start

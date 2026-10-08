@@ -6,9 +6,10 @@ Tradedate 是一个基于 Java 17 和 Spring Boot 3.5.11 的比特币行情数�
 
 ## 主要功能
 
-- 拉取 Binance.US 的 1 分钟 BTCUSDT K 线数据。
-- 通过 Kafka 异步入库，并以 `(symbol, open_time)` 唯一索引保证重复投递时幂等。
-- 查询 `HOURLY` 或 `DAILY` 聚合结果，并通过 Redis cache-aside 缓存。
+- 拉取 Binance.US 的 1 分钟 BTCUSDT K 线数据；只写入已经收盘的 K 线，未收盘的会被跳过。
+- 通过 Kafka 异步入库，以 `(symbol, open_time)` 唯一索引做 upsert：重复投递不会产生重复行，修正后的 K 线会覆盖旧值。
+- 消费失败的记录按指数退避重试，仍失败则写入死信 topic；无法反序列化的记录直接进入死信 topic，不会卡住分区。
+- 查询 `HOURLY` 或 `DAILY` 聚合结果，每个桶附带实际/应有的分钟数和是否完整；结果通过 Redis cache-aside 缓存，新数据写入后相关缓存自动失效。
 - 使用 Docker Compose 启动应用、单节点 Kafka 和 Redis。
 - 可选启用 Kimi 交互式终端，查询已结束的单个 UTC 日期。
 
@@ -124,6 +125,14 @@ Invoke-RestMethod "http://localhost:8080/BTCUSDT/$start/$end"
 Invoke-RestMethod "http://localhost:8080/api/aggregates/HOURLY/BTCUSDT/$start/$end"
 ```
 
+拉取接口的行为：
+
+- `symbol` 只允许 2 到 20 位字母或数字；时间区间必须满足 `startTime < endTime`，且不超过 `BINANCE_MAX_RANGE`（默认 366 天）。不满足时返回 `400`。
+- 对 Binance.US 的请求最多并发 `BINANCE_MAX_CONCURRENT_REQUESTS` 个；遇到 `429`、`5xx` 或网络错误会退避重试（优先使用 `Retry-After`）。
+- 返回的数量是 Kafka 已确认接收的记录数，不含未收盘而被跳过的 K 线。只要有一个批次最终失败，就返回 `502`，并说明已发送多少条、多少个批次失败；已发送的记录可以通过重新请求同一区间安全补齐。
+
+聚合接口每个桶的 `candleCount` 是实际的分钟数，`expectedCandleCount` 是该桶在请求区间内应有的分钟数，`complete` 只有在两者相等且桶已经结束时为 `true`。完全没有数据的桶不会出现在结果中。
+
 拉取接口返回的数量表示已发送到 Kafka 的记录数；最终是否落库应通过应用日志或 PostgreSQL 查询确认：
 
 ```sql
@@ -190,9 +199,18 @@ docker compose run --rm --build --env-from-file .env -e TERMINAL_CHAT_ENABLED=tr
 | `KAFKA_BOOTSTRAP_SERVERS` | 否 | `localhost:9092` | Kafka broker；Compose 内使用 `kafka:29092` |
 | `KAFKA_TRADE_DATA_TOPIC` | 否 | `trade-data` | 行情 topic |
 | `KAFKA_CONSUMER_GROUP_ID` | 否 | `demo-trade-data-consumer` | Kafka consumer group |
+| `KAFKA_TRADE_DATA_DLT_TOPIC` | 否 | `<行情 topic>.DLT` | 死信 topic |
+| `KAFKA_RETRY_MAX_RETRIES` | 否 | `3` | 写入失败后的重试次数，之后进入死信 topic |
+| `KAFKA_RETRY_INITIAL_INTERVAL` | 否 | `PT1S` | 第一次重试的等待时间，之后每次翻倍 |
 | `REDIS_HOST` | 否 | `localhost` | Redis 主机；Compose 内使用 `redis` |
 | `REDIS_PORT` | 否 | `6379` | Redis 端口 |
-| `BINANCE_API_BASE_URL` | 否 | `https://api.binance.us` | 日线回退查询使用的 Binance.US API 根地址 |
+| `BINANCE_API_BASE_URL` | 否 | `https://api.binance.us` | 拉取分钟 K 线和日线回退查询使用的 Binance.US API 根地址 |
+| `BINANCE_MAX_RANGE` | 否 | `P366D` | 单次拉取允许的最大时间区间 |
+| `BINANCE_MAX_CONCURRENT_REQUESTS` | 否 | `4` | 对 Binance.US 的最大并发请求数 |
+| `BINANCE_MAX_ATTEMPTS` | 否 | `3` | 每个批次的最大请求次数（含第一次） |
+| `BINANCE_RETRY_BACKOFF` | 否 | `PT1S` | 重试的初始等待时间，之后每次翻倍 |
+| `AGGREGATE_CACHE_CLOSED_TTL` | 否 | `PT1H` | 区间已经结束的聚合结果缓存时间 |
+| `AGGREGATE_CACHE_OPEN_TTL` | 否 | `PT1M` | 区间延伸到当前时间之后的聚合结果缓存时间 |
 | `MOONSHOT_API_KEY` | 仅终端 | 空 | Moonshot API Key |
 | `KIMI_API_URL` | 否 | `https://api.moonshot.ai/v1/chat/completions` | Kimi Chat Completions 地址 |
 | `KIMI_MODEL` | 否 | `kimi-k3` | Kimi 模型名 |
@@ -212,7 +230,14 @@ macOS/Linux：
 ./mvnw test
 ```
 
-当前 9 个自动化测试覆盖 Binance 响应映射、数据加载接口、Kimi 请求/响应和数据库完整性条件；尚未覆盖真实数据库聚合、Redis、Kafka consumer、交互式终端循环和完整回退链路，也不等同于完整端到端测试。
+测试分两类：
+
+- 单元测试：Binance 响应映射、未收盘 K 线过滤、重试与输入校验、Kafka 发送失败、数据加载接口、Kimi 请求/响应和数据库完整性条件。
+- 集成测试（`PipelineIntegrationTest`）：用 Testcontainers 启动真实的 Kafka、PostgreSQL 和 Redis，覆盖重复投递幂等、修正 K 线覆盖旧值、乱序投递下的小时聚合、桶完整性、缓存 TTL、新数据写入后缓存失效，以及畸形消息进入死信 topic 且不阻塞后续消息。
+
+集成测试需要本机运行 Docker；没有 Docker 时会被跳过而不是失败。尚未覆盖交互式终端循环和完整的 Kimi 回退链路。
+
+每次 push 和 pull request 都会通过 GitHub Actions（`.github/workflows/ci.yml`）运行全部测试。
 
 ## Jenkins 说明
 
