@@ -1,6 +1,6 @@
 # Tradedate
 
-Tradedate 是一个基于 Java 17 和 Spring Boot 3.5.11 的比特币行情数据服务。它可以从 Binance.US 拉取 1 分钟 OHLCV（K 线）数据，经 Kafka producer-consumer 链路异步写入 PostgreSQL，并通过 MyBatis 提供小时和日级聚合查询；聚合结果使用 Redis 缓存 1 小时。
+Tradedate 是一个基于 Java 17 和 Spring Boot 3.5.11 的比特币行情数据服务。它可以从 Binance.US 拉取 1 分钟 OHLCV（K 线）数据，经 Kafka producer-consumer 链路异步写入 PostgreSQL，并通过 MyBatis 提供小时和日级聚合查询；聚合结果使用 Redis 缓存，新数据写入后自动失效。
 
 项目还提供一个可选的 Kimi 命令行行情助手：它可以从中英文问题中识别 BTCUSDT 和日期，优先使用数据库中的完整日线数据，不完整时回退到 Binance.US，并让 Kimi 基于已验证的数据生成中文分析。
 
@@ -259,6 +259,16 @@ macOS/Linux：
 集成测试需要本机运行 Docker；没有 Docker 时会被跳过而不是失败。尚未覆盖交互式终端循环和完整的 Kimi 回退链路。
 
 每次 push 和 pull request 都会通过 GitHub Actions（`.github/workflows/ci.yml`）运行全部测试。
+
+## 持续交付与部署
+
+GitHub Actions（`.github/workflows/ci.yml`）在每次 push 时：
+
+1. 运行全部测试；
+2. 测试通过后构建 Docker 镜像，推送到 `ghcr.io/chenziliang1/tradedate`，标签为 `sha-<commit>` 和分支名；
+3. 可选：通过 AWS Systems Manager 让 EC2 拉取这个 commit 的镜像并重启，等待 `/actuator/health` 通过（PostgreSQL 和 Redis 都可达）才算成功，否则任务失败并打印应用日志。
+
+第 3 步默认关闭，需要一次性配置 AWS（OIDC 角色、EC2 上的 Docker 和数据库配置），步骤见 [deploy/README.md](deploy/README.md)。部署不使用 SSH，GitHub 上不保存 AWS 密钥或数据库密码。
 
 ## Jenkins 说明
 
