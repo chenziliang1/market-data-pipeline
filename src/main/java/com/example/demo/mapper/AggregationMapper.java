@@ -25,11 +25,24 @@ public interface AggregationMapper {
             SELECT
                 CAST(EXTRACT(EPOCH FROM bucket_start) * 1000 AS BIGINT)
                     AS bucket_start_time,
-                (array_agg(open_price ORDER BY open_time))[1]
+                -- A minute with no trades is filled with the previous close, which may belong to the
+                -- previous bucket. Open, high, low and close therefore come from minutes that traded,
+                -- falling back to all minutes only when the whole bucket had no trades.
+                COALESCE(
+                    (array_agg(open_price ORDER BY open_time) FILTER (WHERE nums_of_trade > 0))[1],
+                    (array_agg(open_price ORDER BY open_time))[1])
                     AS open_price,
-                MAX(high_price) AS high_price,
-                MIN(low_price) AS low_price,
-                (array_agg(close_price ORDER BY open_time DESC))[1]
+                COALESCE(
+                    MAX(high_price) FILTER (WHERE nums_of_trade > 0),
+                    MAX(high_price))
+                    AS high_price,
+                COALESCE(
+                    MIN(low_price) FILTER (WHERE nums_of_trade > 0),
+                    MIN(low_price))
+                    AS low_price,
+                COALESCE(
+                    (array_agg(close_price ORDER BY open_time DESC) FILTER (WHERE nums_of_trade > 0))[1],
+                    (array_agg(close_price ORDER BY open_time DESC))[1])
                     AS close_price,
                 SUM(volume) AS volume,
                 SUM(nums_of_trade) AS nums_of_trade,

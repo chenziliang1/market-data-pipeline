@@ -197,6 +197,30 @@ class PipelineIntegrationTest {
         assertThat(hour.isComplete()).isFalse();
     }
 
+    /**
+     * Found by reconciling real 2024 data: the exchange fills a minute without trades with the
+     * previous close, so an empty first minute would leak the previous bucket's price into open,
+     * high or low. The exchange's own candles take open, high and low from actual trades.
+     */
+    @Test
+    void minutesWithoutTradesDoNotSetOpenHighOrLow() throws Exception {
+        producer.send(candle(SYMBOL, HOUR_START, "200", "200", "200", "200", "0", 0));
+        producer.send(candle(SYMBOL, HOUR_START + MINUTE, "10", "15", "9", "14", "1", 3));
+        producer.send(candle(SYMBOL, HOUR_START + 2 * MINUTE, "14", "20", "13", "18", "2", 2));
+        awaitConsumed();
+
+        List<AggregatedTradeData> rows = aggregationService.getAggregated(
+                SYMBOL, HOUR_START, HOUR_END, AggregationPeriod.HOURLY);
+
+        assertThat(rows).singleElement().satisfies(hour -> {
+            assertThat(hour.getOpenPrice()).isEqualByComparingTo("10");
+            assertThat(hour.getHighPrice()).isEqualByComparingTo("20");
+            assertThat(hour.getLowPrice()).isEqualByComparingTo("9");
+            assertThat(hour.getClosePrice()).isEqualByComparingTo("18");
+            assertThat(hour.getCandleCount()).isEqualTo(3L);
+        });
+    }
+
     @Test
     void hourWithEveryMinuteIsMarkedComplete() throws Exception {
         for (int minute = 0; minute < 60; minute++) {
