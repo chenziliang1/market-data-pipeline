@@ -67,6 +67,33 @@ public class AggregatedTradeData {
         this.symbol = symbol;
     }
 
+    /** Minute candles actually stored in this bucket, within the requested range. */
+    public Long getCandleCount() {
+        return candleCount;
+    }
+
+    public void setCandleCount(Long candleCount) {
+        this.candleCount = candleCount;
+    }
+
+    /** Minute candles this bucket should have, within the requested range. */
+    public Long getExpectedCandleCount() {
+        return expectedCandleCount;
+    }
+
+    public void setExpectedCandleCount(Long expectedCandleCount) {
+        this.expectedCandleCount = expectedCandleCount;
+    }
+
+    /** True only when the bucket has every expected candle and has already closed. */
+    public boolean isComplete() {
+        return complete;
+    }
+
+    public void setComplete(boolean complete) {
+        this.complete = complete;
+    }
+
     private Long bucketStartTime;
     private BigDecimal openPrice;
     private BigDecimal highPrice;
@@ -75,4 +102,7 @@ public class AggregatedTradeData {
     private BigDecimal volume;
     private Long numsOfTrade;
     private String symbol;
+    private Long candleCount;
+    private Long expectedCandleCount;
+    private boolean complete;
 }

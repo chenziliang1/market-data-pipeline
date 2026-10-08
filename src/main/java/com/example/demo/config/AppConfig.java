@@ -6,6 +6,8 @@ import org.springframework.context.annotation.Primary;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.web.client.RestTemplate;
 
+import java.time.Clock;
+
 @Configuration
 public class AppConfig {
 
@@ -19,5 +21,10 @@ public class AppConfig {
         factory.setReadTimeout(30_000);
 
         return new RestTemplate(factory);
+    }
+
+    @Bean
+    public Clock clock() {
+        return Clock.systemUTC();
     }
 }
