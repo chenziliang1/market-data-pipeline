@@ -32,7 +32,9 @@ set_env() {
 echo '__COMPOSE_B64__' | base64 -d | gunzip > docker-compose.yml
 echo '__NGINX_B64__' | base64 -d | gunzip > nginx/default.conf
 
-ACTIVE=$(cat active-slot 2>/dev/null || echo none)
+# nginx's upstream is the only record of which slot serves traffic, so it cannot disagree with it.
+ACTIVE=$(sed -n 's/.*server app-\([a-z]*\):.*/\1/p' nginx/upstream.conf 2>/dev/null || true)
+ACTIVE=${ACTIVE:-none}
 if [ "$ACTIVE" = blue ]; then NEW=green; NEW_PORT=8082; else NEW=blue; NEW_PORT=8081; fi
 NEW_VAR=IMAGE_$(echo "$NEW" | tr '[:lower:]' '[:upper:]')
 echo "Active slot: $ACTIVE, deploying $IMAGE to $NEW"
@@ -74,8 +76,8 @@ fi
 # finish the requests they are serving.
 echo "upstream app { server app-$NEW:8080; }" > nginx/upstream.conf
 if [ -n "$(docker compose ps -q --status running nginx)" ]; then
-  docker compose exec -T nginx nginx -t
-  docker compose exec -T nginx nginx -s reload
+  docker compose exec -T nginx nginx -t < /dev/null
+  docker compose exec -T nginx nginx -s reload < /dev/null
 else
   # First blue-green deploy: this also removes the single "app" container of the old layout.
   docker compose up -d --remove-orphans nginx
@@ -89,7 +91,6 @@ for _ in $(seq 1 15); do
 done
 curl -fsS --max-time 2 http://127.0.0.1:8080/actuator/health
 echo
-echo "$NEW" > active-slot
 set_env "$NEW_VAR" "$IMAGE"
 set_env IMAGE "$IMAGE"
 

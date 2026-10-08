@@ -18,7 +18,7 @@ push -> test (单元测试 + Testcontainers 集成测试)
 ## 部署后的样子
 
 - EC2 上用 `/opt/tradedate/docker-compose.yml` 运行 Kafka, Redis, nginx, 以及两个应用槽位 `app-blue` 和 `app-green` 中的一个。这个文件由部署任务从 `deploy/docker-compose.ec2.yml` 复制过去。
-- **蓝绿部署, 不停机**: 新镜像先在空闲的槽位启动 (blue 在 `127.0.0.1:8081`, green 在 `127.0.0.1:8082`), 它自己的 `/actuator/health` 通过后, 才把 nginx 切过去 (`nginx -s reload`, 旧连接处理完才退出), 等 5 秒再优雅停止旧槽位 (Spring Boot 的 `server.shutdown=graceful` 会处理完手上的请求)。当前槽位记在 `/opt/tradedate/active-slot`。
+- **蓝绿部署, 不停机**: 新镜像先在空闲的槽位启动 (blue 在 `127.0.0.1:8081`, green 在 `127.0.0.1:8082`), 它自己的 `/actuator/health` 通过后, 才把 nginx 切过去 (`nginx -s reload`, 旧连接处理完才退出), 等 5 秒再优雅停止旧槽位 (Spring Boot 的 `server.shutdown=graceful` 会处理完手上的请求)。当前槽位就是 `/opt/tradedate/nginx/upstream.conf` 里 nginx 指向的那个, 没有另外记录, 所以两者不会对不上。
 - **部署失败不影响线上**: 新槽位 3 分钟内没通过健康检查, 部署任务失败并打印它的日志, 旧槽位继续服务, `.env` 也不变。应用连不上 PostgreSQL 或 Redis 时健康检查返回 503, 也算失败。
 - 对外只有 nginx 监听 `127.0.0.1:8080`, 外网访问不到。要访问就走 SSH 隧道 (见最后一节)。
 - 拉取接口和 `/api/admin/**` 需要 `X-API-Key`。密钥在第一次部署时于 EC2 上生成, 写在 `.env` 的 `APP_API_KEY`, 不经过 GitHub。
@@ -158,7 +158,7 @@ sudo chmod 600 /opt/tradedate/.env
 ## 日常操作
 
 - **回滚**: 在 Actions 里打开一次更早的、成功的 CI 运行, 只重跑它的 `deploy` job。它会把那次 commit 的镜像部署到空闲槽位并切换过去, 同样不停机。
-- **看日志**: 在 EC2 上 `cd /opt/tradedate && sudo docker compose logs --tail 100 app-$(cat active-slot)`。
+- **看日志**: 在 EC2 上 `cd /opt/tradedate && cat nginx/upstream.conf` 看当前槽位, 再 `sudo docker compose logs --tail 100 app-blue` (或 `app-green`)。
 - **查看 API 密钥**: 在 EC2 上 `sudo grep APP_API_KEY /opt/tradedate/.env`。调用时放在请求头 `X-API-Key` 里。
 - **处理死信**: 通过隧道调用 `GET /api/admin/dead-letters` 查看失败的消息和原因, 原因修好后 `POST /api/admin/dead-letters/replay` 重放。
 - **从自己电脑访问 API**: 开一个 SSH 隧道, 然后访问 `http://localhost:18080`:

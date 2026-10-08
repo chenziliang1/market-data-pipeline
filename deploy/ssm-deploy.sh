@@ -18,8 +18,11 @@ sed -e "s|__IMAGE__|$IMAGE|" \
     -e "s|__REGISTRY_USER__|$REGISTRY_USER|" \
     -e "s|__REGISTRY_TOKEN__|$REGISTRY_TOKEN|" \
     "$here/remote-deploy.sh" > "$script"
-# Sent compressed, to stay well under the Run Command parameter size limit.
-command="echo $(b64 "$script") | base64 -d | gunzip | bash"
+# Sent compressed, to stay well under the Run Command parameter size limit. It is run from a file
+# that only root can read, not piped into bash: commands in the script that read stdin, such as
+# docker compose exec, would otherwise consume the rest of the script, and bash would stop early
+# yet report success.
+command="umask 077; f=\$(mktemp); echo $(b64 "$script") | base64 -d | gunzip > \$f; bash \$f; rc=\$?; rm -f \$f; exit \$rc"
 
 command_id="$(aws ssm send-command \
   --instance-ids "$EC2_INSTANCE_ID" \
