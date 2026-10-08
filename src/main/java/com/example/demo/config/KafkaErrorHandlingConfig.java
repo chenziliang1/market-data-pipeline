@@ -8,6 +8,7 @@ import org.apache.kafka.common.serialization.StringSerializer;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.kafka.core.DefaultKafkaProducerFactory;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.kafka.core.ProducerFactory;
@@ -59,6 +60,9 @@ public class KafkaErrorHandlingConfig {
         backOff.setInitialInterval(initialInterval.toMillis());
         backOff.setMultiplier(2.0);
 
-        return new DefaultErrorHandler(recoverer, backOff);
+        DefaultErrorHandler errorHandler = new DefaultErrorHandler(recoverer, backOff);
+        // A row the database rejects will be rejected again; retrying only delays the rest.
+        errorHandler.addNotRetryableExceptions(DataIntegrityViolationException.class);
+        return errorHandler;
     }
 }

@@ -290,6 +290,38 @@ class PipelineIntegrationTest {
                 .as("records after the malformed one are still consumed")
                 .isEqualTo(1);
 
+        awaitDeadLetter("not json"::equals);
+    }
+
+    @Test
+    void candleRejectedByDatabaseIsDeadLetteredAndRestOfBatchIsKept() {
+        TradeData rejected = candle("BADROW", HOUR_START, "1", "1", "1", "1", "1", 1);
+        rejected.setOpenTime(null); // violates NOT NULL on open_time
+
+        producer.send(candle(SYMBOL, HOUR_START, "10", "15", "9", "14", "1", 1));
+        producer.send(rejected);
+        producer.send(candle(SYMBOL, HOUR_START + MINUTE, "14", "30", "13", "12", "2", 2));
+        awaitConsumed();
+
+        assertThat(countRows(SYMBOL, HOUR_START)).isEqualTo(1);
+        assertThat(countRows(SYMBOL, HOUR_START + MINUTE)).isEqualTo(1);
+        awaitDeadLetter(value -> value.contains("\"symbol\":\"BADROW\""));
+    }
+
+    @Test
+    void candleAndItsCorrectionInOnePollKeepTheCorrection() {
+        // Published back to back so they usually share a poll; the batch upsert must not touch a row twice.
+        producer.send(candle(SYMBOL, HOUR_START, "50", "50", "50", "50", "1", 1));
+        producer.send(candle(SYMBOL, HOUR_START, "999.99", "999.99", "999.99", "999.99", "9", 9));
+        awaitConsumed();
+
+        BigDecimal stored = jdbc.queryForObject(
+                "SELECT open_price FROM newtable WHERE symbol = ? AND open_time = ?",
+                BigDecimal.class, SYMBOL, HOUR_START);
+        assertThat(stored).isEqualByComparingTo("999.99");
+    }
+
+    private void awaitDeadLetter(java.util.function.Predicate<String> matches) {
         try (KafkaConsumer<String, byte[]> deadLetters = new KafkaConsumer<>(Map.of(
                 ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, KAFKA.getBootstrapServers(),
                 ConsumerConfig.GROUP_ID_CONFIG, "dlt-check-" + UUID.randomUUID(),
@@ -297,13 +329,13 @@ class PipelineIntegrationTest {
                 ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class,
                 ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, ByteArrayDeserializer.class))) {
             deadLetters.subscribe(List.of(DEAD_LETTER_TOPIC));
-            List<ConsumerRecord<String, byte[]>> received = new ArrayList<>();
+            List<String> received = new ArrayList<>();
             await().atMost(Duration.ofSeconds(30)).until(() -> {
-                deadLetters.poll(Duration.ofMillis(500)).forEach(received::add);
-                return !received.isEmpty();
+                for (ConsumerRecord<String, byte[]> record : deadLetters.poll(Duration.ofMillis(500))) {
+                    received.add(new String(record.value(), StandardCharsets.UTF_8));
+                }
+                return received.stream().anyMatch(matches);
             });
-
-            assertThat(new String(received.get(0).value(), StandardCharsets.UTF_8)).isEqualTo("not json");
         }
     }
 

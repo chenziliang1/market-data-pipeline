@@ -9,7 +9,8 @@ Tradedate 是一个基于 Java 17 和 Spring Boot 3.5.11 的比特币行情数�
 - 拉取 Binance.US 的 1 分钟 BTCUSDT K 线数据；只写入已经收盘的 K 线。是否收盘按交易所的服务器时间（`/api/v3/time`）减 2 秒判断，而不是本机时钟。
 - 每日对账：把数据库按 UTC 日聚合出的开高低收、成交量和成交笔数，逐字段与交易所自己的日线比对，报告一致、不一致、数据不完整和交易所缺失的天数。
 - 通过 Kafka 异步入库，以 `(symbol, open_time)` 唯一索引做 upsert：重复投递不会产生重复行，修正后的 K 线会覆盖旧值。
-- 消费失败的记录按指数退避重试，仍失败则写入死信 topic；无法反序列化的记录直接进入死信 topic，不会卡住分区。
+- consumer 以批量方式消费：每次 poll（最多 `KAFKA_MAX_POLL_RECORDS` 条，默认 500）用一条多行 upsert 写入。同一批里同一根 K 线出现多次时保留最后一个版本。
+- 消费失败的记录按指数退避重试，仍失败则写入死信 topic；无法反序列化或被数据库拒绝（如违反约束）的记录不重试，直接进入死信 topic。批量写入失败时会逐行重试找出那一条，同批其他记录照常写入，不会卡住分区。
 - 查询 `HOURLY` 或 `DAILY` 聚合结果，每个桶附带实际/应有的分钟数和是否完整；结果通过 Redis cache-aside 缓存，新数据写入后相关缓存自动失效。
 - 使用 Docker Compose 启动应用、单节点 Kafka 和 Redis。
 - 可选启用 Kimi 交互式终端，查询已结束的单个 UTC 日期。
@@ -135,6 +136,15 @@ Invoke-RestMethod "http://localhost:8080/api/aggregates/HOURLY/BTCUSDT/$start/$e
 
 聚合的开、高、低、收只取有成交的分钟：交易所会用上一分钟的收盘价填充没有成交的分钟，如果当天第一分钟没有成交，直接取它会把前一天的价格带进今天的开盘价。这个问题是用对账接口核对 2024 全年真实数据时发现的（修复前 366 天中有 22 天开盘价不一致，修复后 366 天全部一致）。
 
+批量写入前后的吞吐（本机 Docker 上的 PostgreSQL 16 和 Kafka 3.9.1，从同一个 topic 消费 2024 全年 527,040 条消息，只计写库时间）：
+
+| 版本 | 耗时 | 吞吐 |
+| --- | --- | --- |
+| 逐条写入 | 162.0 秒 | 约 3,250 行/秒 |
+| 每次 poll 一条多行 upsert | 约 10.5 秒（两次 10.7 / 10.4） | 约 50,000 行/秒 |
+
+改成批量写入后，拉取全年数据时 consumer 已能跟上 Binance.US 的拉取速度：接口返回时（约 27 秒）数据已全部落库，之前要约 190 秒。数据库在远端（如 RDS）时每条语句多一次网络往返，实际数字会不同。
+
 对账接口只比较存满 1,440 分钟的日子；分钟数不足的记为 `INCOMPLETE`，不参与比较。数值按值比较（`1.5` 等于 `1.50000000`），成交笔数必须完全相等。返回的 `discrepancies` 只列出没有对上的日子及其不一致的字段。例如核对 2024 全年：
 
 ```powershell
@@ -210,6 +220,7 @@ docker compose run --rm --build --env-from-file .env -e TERMINAL_CHAT_ENABLED=tr
 | `KAFKA_TRADE_DATA_TOPIC` | 否 | `trade-data` | 行情 topic |
 | `KAFKA_CONSUMER_GROUP_ID` | 否 | `demo-trade-data-consumer` | Kafka consumer group |
 | `KAFKA_TRADE_DATA_DLT_TOPIC` | 否 | `<行情 topic>.DLT` | 死信 topic |
+| `KAFKA_MAX_POLL_RECORDS` | 否 | `500` | 每次 poll 的最大条数，也是一条多行 upsert 的最大行数 |
 | `KAFKA_RETRY_MAX_RETRIES` | 否 | `3` | 写入失败后的重试次数，之后进入死信 topic |
 | `KAFKA_RETRY_INITIAL_INTERVAL` | 否 | `PT1S` | 第一次重试的等待时间，之后每次翻倍 |
 | `REDIS_HOST` | 否 | `localhost` | Redis 主机；Compose 内使用 `redis` |
@@ -243,7 +254,7 @@ macOS/Linux：
 测试分两类：
 
 - 单元测试：Binance 响应映射、按交易所时钟过滤未收盘 K 线、重试与输入校验、Kafka 发送失败、对账的分类与校验、数据加载接口、Kimi 请求/响应和数据库完整性条件。
-- 集成测试（`PipelineIntegrationTest`）：用 Testcontainers 启动真实的 Kafka、PostgreSQL 和 Redis，覆盖重复投递幂等、修正 K 线覆盖旧值、乱序投递下的小时聚合、桶完整性、缓存 TTL、新数据写入后缓存失效、畸形消息进入死信 topic 且不阻塞后续消息，以及对账能发现被故意改坏的一根 K 线。
+- 集成测试（`PipelineIntegrationTest`）：用 Testcontainers 启动真实的 Kafka、PostgreSQL 和 Redis，覆盖重复投递幂等、修正 K 线覆盖旧值、乱序投递下的小时聚合、桶完整性、缓存 TTL、新数据写入后缓存失效、畸形消息进入死信 topic 且不阻塞后续消息、被数据库拒绝的一行进入死信 topic 而同批其他行照常写入、同一批里的修正版覆盖原版，以及对账能发现被故意改坏的一根 K 线。
 
 集成测试需要本机运行 Docker；没有 Docker 时会被跳过而不是失败。尚未覆盖交互式终端循环和完整的 Kimi 回退链路。
 
