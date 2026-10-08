@@ -11,19 +11,21 @@ here="$(cd "$(dirname "$0")" && pwd)"
 script="$(mktemp)"
 trap 'rm -f "$script"' EXIT
 
-# Compressed to keep the command well under the Run Command parameter size limit.
-compose_b64="$(gzip -9c "$here/docker-compose.ec2.yml" | base64 | tr -d '\n')"
+b64() { gzip -9c "$1" | base64 | tr -d '\n'; }
 sed -e "s|__IMAGE__|$IMAGE|" \
-    -e "s|__COMPOSE_B64__|$compose_b64|" \
+    -e "s|__COMPOSE_B64__|$(b64 "$here/docker-compose.ec2.yml")|" \
+    -e "s|__NGINX_B64__|$(b64 "$here/nginx.conf")|" \
     -e "s|__REGISTRY_USER__|$REGISTRY_USER|" \
     -e "s|__REGISTRY_TOKEN__|$REGISTRY_TOKEN|" \
     "$here/remote-deploy.sh" > "$script"
+# Sent compressed, to stay well under the Run Command parameter size limit.
+command="echo $(b64 "$script") | base64 -d | gunzip | bash"
 
 command_id="$(aws ssm send-command \
   --instance-ids "$EC2_INSTANCE_ID" \
   --document-name AWS-RunShellScript \
   --comment "Deploy $IMAGE" \
-  --parameters "$(jq -n --rawfile s "$script" '{commands: [$s], executionTimeout: ["900"]}')" \
+  --parameters "$(jq -n --arg c "$command" '{commands: [$c], executionTimeout: ["900"]}')" \
   --query Command.CommandId --output text)"
 echo "SSM command $command_id sent"
 

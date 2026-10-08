@@ -1,14 +1,38 @@
-# Stack that runs on the EC2 host. The deploy job copies this file to /opt/tradedate/docker-compose.yml
-# and sets IMAGE to the image built from the commit being deployed. Database settings come from
-# /opt/tradedate/.env, which is created once on the host and never leaves it.
+# Stack that runs on the EC2 host. The deploy job copies this file to /opt/tradedate/docker-compose.yml.
+# Database settings and the API key come from /opt/tradedate/.env, which never leaves the host.
 #
-# Sized for a 1 GiB t3.micro with 2 GiB of swap.
+# Blue-green: app-blue and app-green are two slots for the application. A deploy starts the new
+# image in the idle slot, waits until it is healthy, points nginx at it, then stops the old slot.
+# Only nginx listens on port 8080; the slots are reachable directly on 8081 and 8082 for checks.
+#
+# Sized for a 1 GiB t3.micro with 2 GiB of swap (both slots run together for a few seconds).
 
 x-logging: &logging
   driver: json-file
   options:
     max-size: "10m"
     max-file: "3"
+
+x-app: &app
+  restart: unless-stopped
+  # Lets in-flight requests finish (server.shutdown=graceful) before the container is killed.
+  stop_grace_period: 30s
+  environment:
+    SPRING_DATASOURCE_URL: "${SPRING_DATASOURCE_URL:?Set SPRING_DATASOURCE_URL in /opt/tradedate/.env}"
+    SPRING_DATASOURCE_USERNAME: "${SPRING_DATASOURCE_USERNAME:?Set SPRING_DATASOURCE_USERNAME in /opt/tradedate/.env}"
+    SPRING_DATASOURCE_PASSWORD: "${SPRING_DATASOURCE_PASSWORD:?Set SPRING_DATASOURCE_PASSWORD in /opt/tradedate/.env}"
+
+    KAFKA_BOOTSTRAP_SERVERS: "kafka:29092"
+    KAFKA_TRADE_DATA_TOPIC: "${KAFKA_TRADE_DATA_TOPIC:-trade-data}"
+    KAFKA_CONSUMER_GROUP_ID: "${KAFKA_CONSUMER_GROUP_ID:-demo-trade-data-consumer}"
+    REDIS_HOST: "redis"
+    REDIS_PORT: "6379"
+    APP_API_KEY: "${APP_API_KEY:?Set APP_API_KEY in /opt/tradedate/.env}"
+    JAVA_TOOL_OPTIONS: "-Xmx320m"
+  depends_on:
+    - kafka
+    - redis
+  logging: *logging
 
 services:
   kafka:
@@ -46,28 +70,28 @@ services:
     command: ["redis-server", "--maxmemory", "64mb", "--maxmemory-policy", "allkeys-lru"]
     logging: *logging
 
-  app:
-    image: "${IMAGE:?IMAGE is set by the deploy job}"
+  app-blue:
+    <<: *app
+    image: "${IMAGE_BLUE:-${IMAGE:?IMAGE is set by the deploy job}}"
+    ports:
+      - "127.0.0.1:8081:8080"
+
+  app-green:
+    <<: *app
+    image: "${IMAGE_GREEN:-${IMAGE:?IMAGE is set by the deploy job}}"
+    ports:
+      - "127.0.0.1:8082:8080"
+
+  nginx:
+    image: nginx:1.27-alpine
     restart: unless-stopped
-    # The load endpoint has no authentication, so the API is bound to localhost only.
-    # Reach it through an SSH tunnel.
+    # The load endpoint calls the exchange and the API has admin endpoints, so the API is bound to
+    # localhost only. Reach it through an SSH tunnel or Session Manager port forwarding.
     ports:
       - "127.0.0.1:8080:8080"
-    environment:
-      SPRING_DATASOURCE_URL: "${SPRING_DATASOURCE_URL:?Set SPRING_DATASOURCE_URL in /opt/tradedate/.env}"
-      SPRING_DATASOURCE_USERNAME: "${SPRING_DATASOURCE_USERNAME:?Set SPRING_DATASOURCE_USERNAME in /opt/tradedate/.env}"
-      SPRING_DATASOURCE_PASSWORD: "${SPRING_DATASOURCE_PASSWORD:?Set SPRING_DATASOURCE_PASSWORD in /opt/tradedate/.env}"
-
-      KAFKA_BOOTSTRAP_SERVERS: "kafka:29092"
-      KAFKA_TRADE_DATA_TOPIC: "${KAFKA_TRADE_DATA_TOPIC:-trade-data}"
-      KAFKA_CONSUMER_GROUP_ID: "${KAFKA_CONSUMER_GROUP_ID:-demo-trade-data-consumer}"
-      REDIS_HOST: "redis"
-      REDIS_PORT: "6379"
-      APP_API_KEY: "${APP_API_KEY:?Set APP_API_KEY in /opt/tradedate/.env}"
-      JAVA_TOOL_OPTIONS: "-Xmx320m"
-    depends_on:
-      - kafka
-      - redis
+    volumes:
+      # default.conf and upstream.conf; the deploy rewrites upstream.conf to switch slots.
+      - ./nginx:/etc/nginx/conf.d:ro
     logging: *logging
 
 volumes:

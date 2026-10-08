@@ -5,7 +5,7 @@
 ```text
 push -> test (单元测试 + Testcontainers 集成测试)
           -> image  (构建镜像, 推到 ghcr.io, 标签为 sha-<commit> 和分支名)
-               -> deploy (通过 AWS Systems Manager 让 EC2 拉取这个 commit 的镜像并重启, 等健康检查通过)
+               -> deploy (通过 AWS Systems Manager 让 EC2 用蓝绿方式切换到这个 commit 的镜像)
 ```
 
 `test` 和 `image` 每次 push 都会运行。`deploy` 默认关闭, 完成下面的一次性配置, 并设置 `DEPLOY_ENABLED=true` 后才会运行。
@@ -17,11 +17,14 @@ push -> test (单元测试 + Testcontainers 集成测试)
 
 ## 部署后的样子
 
-- EC2 上用 `/opt/tradedate/docker-compose.yml` 运行三个容器: Kafka, Redis, 应用。这个文件由部署任务从 `deploy/docker-compose.ec2.yml` 复制过去。
-- 应用只绑定在 `127.0.0.1:8080`, 外网访问不到, 因为加载接口没有鉴权。要访问就走 SSH 隧道 (见最后一节)。
+- EC2 上用 `/opt/tradedate/docker-compose.yml` 运行 Kafka, Redis, nginx, 以及两个应用槽位 `app-blue` 和 `app-green` 中的一个。这个文件由部署任务从 `deploy/docker-compose.ec2.yml` 复制过去。
+- **蓝绿部署, 不停机**: 新镜像先在空闲的槽位启动 (blue 在 `127.0.0.1:8081`, green 在 `127.0.0.1:8082`), 它自己的 `/actuator/health` 通过后, 才把 nginx 切过去 (`nginx -s reload`, 旧连接处理完才退出), 等 5 秒再优雅停止旧槽位 (Spring Boot 的 `server.shutdown=graceful` 会处理完手上的请求)。当前槽位记在 `/opt/tradedate/active-slot`。
+- **部署失败不影响线上**: 新槽位 3 分钟内没通过健康检查, 部署任务失败并打印它的日志, 旧槽位继续服务, `.env` 也不变。应用连不上 PostgreSQL 或 Redis 时健康检查返回 503, 也算失败。
+- 对外只有 nginx 监听 `127.0.0.1:8080`, 外网访问不到。要访问就走 SSH 隧道 (见最后一节)。
+- 拉取接口和 `/api/admin/**` 需要 `X-API-Key`。密钥在第一次部署时于 EC2 上生成, 写在 `.env` 的 `APP_API_KEY`, 不经过 GitHub。
 - Kafka 的数据放在 Docker 卷里, 重新部署不会丢失 topic 和已提交的 offset。
-- 部署任务轮询 `/actuator/health` 最多 3 分钟。应用连不上 PostgreSQL 或 Redis 时, 健康检查返回 503, 部署任务失败, 并打印应用最后 80 行日志。
-- 内存: 在本机测得三个容器合计约 730 MiB, 所以 1 GiB 的 t3.micro 需要加 2 GiB swap (第 2 步)。
+- 数据库结构由应用启动时的 Flyway 迁移管理, 部署新版本时自动执行。
+- 内存: 平时约 500 MiB (应用约 200, Kafka 约 250, nginx 和 Redis 很少); 切换的几秒内两个应用同时运行, 所以 1 GiB 的 t3.micro 需要加 2 GiB swap (第 2 步)。
 
 ## 一次性配置
 
@@ -143,7 +146,7 @@ sudo chmod 600 /opt/tradedate/.env
 ### 5. 触发一次部署并验证
 
 1. 往这个分支 push 一个 commit; 或者在 Actions 里打开最近一次 CI → Re-run all jobs。
-2. `deploy` job 变绿, 日志末尾出现 `{"status":"UP"}` 和 `Deployed ghcr.io/chenziliang1/tradedate:sha-...`, 就说明部署成功了。
+2. `deploy` job 变绿, 日志里出现 `Active slot: ..., deploying ... to <槽位>`, `{"status":"UP"}` 和 `Deployed ghcr.io/chenziliang1/tradedate:sha-... to <槽位>`, 就说明部署成功了。
 3. 在 EC2 上确认:
 
    ```bash
@@ -154,8 +157,10 @@ sudo chmod 600 /opt/tradedate/.env
 
 ## 日常操作
 
-- **回滚**: 在 Actions 里打开一次更早的、成功的 CI 运行, 只重跑它的 `deploy` job。它会部署那次 commit 的镜像。
-- **看日志**: 在 EC2 上 `cd /opt/tradedate && sudo docker compose logs --tail 100 app`。
+- **回滚**: 在 Actions 里打开一次更早的、成功的 CI 运行, 只重跑它的 `deploy` job。它会把那次 commit 的镜像部署到空闲槽位并切换过去, 同样不停机。
+- **看日志**: 在 EC2 上 `cd /opt/tradedate && sudo docker compose logs --tail 100 app-$(cat active-slot)`。
+- **查看 API 密钥**: 在 EC2 上 `sudo grep APP_API_KEY /opt/tradedate/.env`。调用时放在请求头 `X-API-Key` 里。
+- **处理死信**: 通过隧道调用 `GET /api/admin/dead-letters` 查看失败的消息和原因, 原因修好后 `POST /api/admin/dead-letters/replay` 重放。
 - **从自己电脑访问 API**: 开一个 SSH 隧道, 然后访问 `http://localhost:18080`:
 
   ```powershell
@@ -171,5 +176,5 @@ sudo chmod 600 /opt/tradedate/.env
 | `Could not assume role` / `Not authorized to perform sts:AssumeRoleWithWebIdentity` | 第 3 步信任关系里的仓库名或分支名和实际不一致 |
 | `InvalidInstanceId` | 实例没在 Fleet Manager 里 Online: 检查第 1 步的角色, 以及实例能否访问外网 |
 | `.env is missing` | 没做第 2 步的数据库配置 |
-| 3 分钟内健康检查没通过 | 看任务日志里打印的应用日志: 多半是 `.env` 的连接信息不对, 或者 RDS 安全组不允许这台 EC2 |
+| 3 分钟内健康检查没通过 | 旧槽位仍在服务。看任务日志里打印的新槽位日志: 多半是 `.env` 的连接信息不对, RDS 安全组不允许这台 EC2, 或者 Flyway 迁移失败 |
 | 容器反复重启, `dmesg` 里有 `Out of memory` | swap 没加上, 用 `free -h` 检查 |
