@@ -1,9 +1,11 @@
 package com.example.demo;
 
+import com.example.demo.dto.DailyReconciliationReport;
 import com.example.demo.entity.AggregatedTradeData;
 import com.example.demo.entity.AggregationPeriod;
 import com.example.demo.entity.TradeData;
 import com.example.demo.service.AggregationService;
+import com.example.demo.service.DailyReconciliationService;
 import com.example.demo.service.TradeDataProducer;
 import org.apache.kafka.clients.admin.AdminClient;
 import org.apache.kafka.clients.admin.AdminClientConfig;
@@ -21,14 +23,19 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.core.io.FileSystemResource;
 import org.springframework.data.redis.core.RedisCallback;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.init.ScriptUtils;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.test.web.client.ExpectedCount;
+import org.springframework.test.web.client.MockRestServiceServer;
+import org.springframework.web.client.RestTemplate;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Container;
@@ -40,6 +47,8 @@ import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.time.Duration;
+import java.time.LocalDate;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -48,6 +57,9 @@ import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
+import static org.hamcrest.Matchers.containsString;
+import static org.springframework.test.web.client.match.MockRestRequestMatchers.requestTo;
+import static org.springframework.test.web.client.response.MockRestResponseCreators.withSuccess;
 
 /**
  * End-to-end checks against real Kafka, PostgreSQL and Redis containers.
@@ -103,6 +115,13 @@ class PipelineIntegrationTest {
 
     @Autowired
     private StringRedisTemplate redis;
+
+    @Autowired
+    private DailyReconciliationService reconciliationService;
+
+    @Autowired
+    @Qualifier("restTemplate")
+    private RestTemplate restTemplate;
 
     @BeforeAll
     static void createSchemaAndTopics() throws Exception {
@@ -262,6 +281,48 @@ class PipelineIntegrationTest {
 
             assertThat(new String(received.get(0).value(), StandardCharsets.UTF_8)).isEqualTo("not json");
         }
+    }
+
+    @Test
+    void reconciliationMatchesExchangeAndCatchesPlantedCorruption() {
+        LocalDate day = LocalDate.of(2023, 11, 15);
+        long dayStart = day.atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli();
+        List<Object[]> minutes = new ArrayList<>();
+        for (int minute = 0; minute < 1440; minute++) {
+            long openTime = dayStart + minute * MINUTE;
+            minutes.add(new Object[]{openTime, new BigDecimal(100 + minute), new BigDecimal(101 + minute),
+                    new BigDecimal(99 + minute), new BigDecimal(100 + minute).add(new BigDecimal("0.5")),
+                    new BigDecimal("0.5"), openTime + MINUTE - 1, 2L, SYMBOL});
+        }
+        jdbc.batchUpdate("""
+                INSERT INTO newtable (open_time, open_price, high_price, low_price, close_price,
+                                      volume, close_time, nums_of_trade, symbol)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, minutes);
+
+        // The exchange's own daily candle for the same day: open of the first minute, close of the last.
+        String exchangeDaily = "[[%d,\"100\",\"1540\",\"99\",\"1539.5\",\"720.00000000\",%d,\"0\",2880]]"
+                .formatted(dayStart, dayStart + 86_400_000L - 1);
+
+        MockRestServiceServer exchange = MockRestServiceServer.bindTo(restTemplate).build();
+        exchange.expect(ExpectedCount.twice(), requestTo(containsString("interval=1d")))
+                .andRespond(withSuccess(exchangeDaily, MediaType.APPLICATION_JSON));
+
+        DailyReconciliationReport clean = reconciliationService.reconcile(SYMBOL, day, day);
+        assertThat(clean.matchedDays()).isEqualTo(1);
+        assertThat(clean.discrepancies()).isEmpty();
+
+        // Plant a wrong close on the last minute of the day; the oracle must notice.
+        jdbc.update("UPDATE newtable SET close_price = 0 WHERE symbol = ? AND open_time = ?",
+                SYMBOL, dayStart + 1439 * MINUTE);
+
+        DailyReconciliationReport corrupted = reconciliationService.reconcile(SYMBOL, day, day);
+        assertThat(corrupted.mismatchedDays()).isEqualTo(1);
+        assertThat(corrupted.discrepancies()).singleElement().satisfies(discrepancy ->
+                assertThat(discrepancy.differences())
+                        .extracting(DailyReconciliationReport.FieldDifference::field)
+                        .containsExactly("close"));
+        exchange.verify();
     }
 
     /**

@@ -21,10 +21,8 @@ import java.io.ByteArrayOutputStream;
 import java.io.PrintStream;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
-import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
-import java.time.ZoneOffset;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 
@@ -35,7 +33,9 @@ import static org.mockito.Mockito.*;
 @ExtendWith(MockitoExtension.class)
 public class BinanceServiceTest {
 
-    private static final Instant NOW = Instant.parse("2026-01-01T00:00:00Z");
+    /** The exchange's clock in these tests. */
+    private static final long EXCHANGE_NOW = Instant.parse("2026-01-01T00:00:00Z").toEpochMilli();
+    private static final String KLINES = "/api/v3/klines";
 
     private static final String TWO_CLOSED_CANDLES = """
             [
@@ -78,7 +78,6 @@ public class BinanceServiceTest {
                 tradeDataProducer,
                 restTemplate,
                 new ObjectMapper(),
-                Clock.fixed(NOW, ZoneOffset.UTC),
                 "https://api.binance.us",
                 Duration.ofDays(366),
                 2,
@@ -97,8 +96,8 @@ public class BinanceServiceTest {
         Long startTime = 1697068382000L;
         Long endTime = startTime + 2 * 60000L;
 
-        when(restTemplate.getForEntity(anyString(), eq(String.class)))
-                .thenReturn(ResponseEntity.ok(TWO_CLOSED_CANDLES));
+        klinesReturn(TWO_CLOSED_CANDLES);
+        exchangeTimeIs(EXCHANGE_NOW);
         producerAcknowledges();
 
         int result = binanceService.load(symbol, startTime, endTime);
@@ -135,8 +134,8 @@ public class BinanceServiceTest {
         Long startTime = 1697068382000L;
         Long endTime = startTime + 60000L;
 
-        when(restTemplate.getForEntity(anyString(), eq(String.class)))
-                .thenReturn(ResponseEntity.ok("[]"));
+        klinesReturn("[]");
+        exchangeTimeIs(EXCHANGE_NOW);
 
         int result = binanceService.load(symbol, startTime, endTime);
 
@@ -152,8 +151,8 @@ public class BinanceServiceTest {
         ByteArrayOutputStream errorOutput = new ByteArrayOutputStream();
         PrintStream originalError = System.err;
 
-        when(restTemplate.getForEntity(anyString(), eq(String.class)))
-                .thenReturn(ResponseEntity.ok("invalid json"));
+        klinesReturn("invalid json");
+        exchangeTimeIs(EXCHANGE_NOW);
 
         MarketDataLoadException exception;
         try {
@@ -172,21 +171,14 @@ public class BinanceServiceTest {
     }
 
     @Test
-    public void test_load_skipsCandleThatHasNotClosed() {
-        long closedOpen = NOW.toEpochMilli() - 60_000L;
-        long openOpen = NOW.toEpochMilli();
-        String json = """
-                [
-                  [%d, "1", "1", "1", "1", "1", %d, "0", 1],
-                  [%d, "2", "2", "2", "2", "2", %d, "0", 2]
-                ]
-                """.formatted(closedOpen, closedOpen + 59_999L, openOpen, openOpen + 59_999L);
-
-        when(restTemplate.getForEntity(anyString(), eq(String.class)))
-                .thenReturn(ResponseEntity.ok(json));
+    public void test_load_skipsCandleTheExchangeHasNotClosed() {
+        long closedOpen = EXCHANGE_NOW - 120_000L;
+        long formingOpen = EXCHANGE_NOW - 30_000L;
+        klinesReturn(klines(closedOpen, formingOpen));
+        exchangeTimeIs(EXCHANGE_NOW);
         producerAcknowledges();
 
-        int result = binanceService.load("BTCUSDT", closedOpen, openOpen + 60_000L);
+        int result = binanceService.load("BTCUSDT", closedOpen, formingOpen + 60_000L);
 
         Assertions.assertEquals(1, result);
         ArgumentCaptor<TradeData> captor = ArgumentCaptor.forClass(TradeData.class);
@@ -195,17 +187,46 @@ public class BinanceServiceTest {
     }
 
     @Test
+    public void test_load_usesExchangeClockWithSafetyMargin() {
+        // Closed one second ago by the exchange's clock: inside the two-second margin, so not yet trusted.
+        long justClosedOpen = EXCHANGE_NOW - 61_000L;
+        klinesReturn(klines(justClosedOpen));
+        exchangeTimeIs(EXCHANGE_NOW);
+
+        int result = binanceService.load("BTCUSDT", justClosedOpen, justClosedOpen + 60_000L);
+
+        Assertions.assertEquals(0, result);
+        verify(tradeDataProducer, never()).send(any());
+    }
+
+    @Test
+    public void test_load_failsWithoutExchangeTime() {
+        doThrow(HttpServerErrorException.create(
+                HttpStatus.SERVICE_UNAVAILABLE, "unavailable", HttpHeaders.EMPTY, null, null))
+                .when(restTemplate).getForEntity(contains("/api/v3/time"), eq(String.class));
+
+        MarketDataLoadException exception = Assertions.assertThrows(
+                MarketDataLoadException.class,
+                () -> binanceService.load("BTCUSDT", 1697068382000L, 1697068382000L + 60000L));
+
+        Assertions.assertEquals(1, exception.getFailedBatches());
+        verify(restTemplate, never()).getForEntity(contains(KLINES), eq(String.class));
+        verify(tradeDataProducer, never()).send(any());
+    }
+
+    @Test
     public void test_load_retriesServerErrorThenSucceeds() {
         when(restTemplate.getForEntity(anyString(), eq(String.class)))
                 .thenThrow(HttpServerErrorException.create(
                         HttpStatus.SERVICE_UNAVAILABLE, "unavailable", HttpHeaders.EMPTY, null, null))
                 .thenReturn(ResponseEntity.ok(TWO_CLOSED_CANDLES));
+        exchangeTimeIs(EXCHANGE_NOW);
         producerAcknowledges();
 
         int result = binanceService.load("BTCUSDT", 1697068382000L, 1697068382000L + 2 * 60000L);
 
         Assertions.assertEquals(2, result);
-        verify(restTemplate, times(2)).getForEntity(anyString(), eq(String.class));
+        verify(restTemplate, times(2)).getForEntity(contains(KLINES), eq(String.class));
     }
 
     @Test
@@ -213,13 +234,14 @@ public class BinanceServiceTest {
         when(restTemplate.getForEntity(anyString(), eq(String.class)))
                 .thenThrow(HttpClientErrorException.create(
                         HttpStatus.TOO_MANY_REQUESTS, "slow down", HttpHeaders.EMPTY, null, null));
+        exchangeTimeIs(EXCHANGE_NOW);
 
         MarketDataLoadException exception = Assertions.assertThrows(
                 MarketDataLoadException.class,
                 () -> binanceService.load("BTCUSDT", 1697068382000L, 1697068382000L + 60000L));
 
         Assertions.assertEquals(1, exception.getFailedBatches());
-        verify(restTemplate, times(3)).getForEntity(anyString(), eq(String.class));
+        verify(restTemplate, times(3)).getForEntity(contains(KLINES), eq(String.class));
         verify(tradeDataProducer, never()).send(any());
     }
 
@@ -228,18 +250,19 @@ public class BinanceServiceTest {
         when(restTemplate.getForEntity(anyString(), eq(String.class)))
                 .thenThrow(HttpClientErrorException.create(
                         HttpStatus.BAD_REQUEST, "bad request", HttpHeaders.EMPTY, null, null));
+        exchangeTimeIs(EXCHANGE_NOW);
 
         Assertions.assertThrows(
                 MarketDataLoadException.class,
                 () -> binanceService.load("BTCUSDT", 1697068382000L, 1697068382000L + 60000L));
 
-        verify(restTemplate, times(1)).getForEntity(anyString(), eq(String.class));
+        verify(restTemplate, times(1)).getForEntity(contains(KLINES), eq(String.class));
     }
 
     @Test
     public void test_load_reportsFailedKafkaSend() {
-        when(restTemplate.getForEntity(anyString(), eq(String.class)))
-                .thenReturn(ResponseEntity.ok(TWO_CLOSED_CANDLES));
+        klinesReturn(TWO_CLOSED_CANDLES);
+        exchangeTimeIs(EXCHANGE_NOW);
         when(tradeDataProducer.send(any()))
                 .thenReturn(CompletableFuture.failedFuture(new IllegalStateException("broker unavailable")));
 
@@ -271,7 +294,30 @@ public class BinanceServiceTest {
         verifyNoInteractions(restTemplate, tradeDataProducer);
     }
 
+    private void klinesReturn(String body) {
+        when(restTemplate.getForEntity(anyString(), eq(String.class)))
+                .thenReturn(ResponseEntity.ok(body));
+    }
+
+    /** Registered after the other stubs so it wins for the server-time URL; doReturn avoids calling them. */
+    private void exchangeTimeIs(long serverTime) {
+        doReturn(ResponseEntity.ok("{\"serverTime\":" + serverTime + "}"))
+                .when(restTemplate).getForEntity(contains("/api/v3/time"), eq(String.class));
+    }
+
     private void producerAcknowledges() {
         when(tradeDataProducer.send(any())).thenReturn(CompletableFuture.completedFuture(null));
+    }
+
+    private static String klines(long... openTimes) {
+        StringBuilder json = new StringBuilder("[");
+        for (int i = 0; i < openTimes.length; i++) {
+            if (i > 0) {
+                json.append(',');
+            }
+            json.append("[%d,\"1\",\"1\",\"1\",\"1\",\"1\",%d,\"0\",1]"
+                    .formatted(openTimes[i], openTimes[i] + 59_999L));
+        }
+        return json.append(']').toString();
     }
 }

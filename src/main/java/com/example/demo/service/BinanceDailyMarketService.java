@@ -14,10 +14,16 @@ import org.springframework.web.server.ResponseStatusException;
 import org.springframework.web.util.UriComponentsBuilder;
 
 import java.math.BigDecimal;
+import java.time.Instant;
 import java.time.LocalDate;
+import java.time.ZoneOffset;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 @Service
 public class BinanceDailyMarketService {
+
+    private static final long DAY_MILLIS = 86_400_000L;
 
     private final RestTemplate restTemplate;
     private final ObjectMapper objectMapper;
@@ -96,6 +102,78 @@ public class BinanceDailyMarketService {
                     decimal(candle, 5),
                     candle.get(8).asLong(),
                     "BINANCE_US");
+
+        } catch (ResponseStatusException exception) {
+            throw exception;
+
+        } catch (RestClientException exception) {
+            throw unavailable(
+                    "请求 Binance.US 失败",
+                    exception);
+
+        } catch (Exception exception) {
+            throw unavailable(
+                    "Binance.US 返回的数据无法解析",
+                    exception);
+        }
+    }
+
+    /**
+     * Fetches the exchange's own daily candles whose open time falls in [startTime, endTime),
+     * keyed by open time. Used as the independent reference for reconciliation.
+     */
+    public Map<Long, DailyOhlcvResponse> fetchDailyRange(
+            String symbol,
+            long startTime,
+            long endTime) {
+
+        String url = UriComponentsBuilder
+                .fromUriString(baseUrl)
+                .path("/api/v3/klines")
+                .queryParam("symbol", symbol)
+                .queryParam("interval", "1d")
+                .queryParam("startTime", startTime)
+                .queryParam("endTime", endTime - 1)
+                .queryParam("limit", (endTime - startTime) / DAY_MILLIS)
+                .build()
+                .encode()
+                .toUriString();
+
+        try {
+            JsonNode root = objectMapper.readTree(
+                    restTemplate.getForEntity(url, String.class).getBody());
+
+            if (root == null || !root.isArray()) {
+                throw unavailable(
+                        "Binance.US 返回的日线格式不正确",
+                        null);
+            }
+
+            Map<Long, DailyOhlcvResponse> candles = new LinkedHashMap<>();
+            for (JsonNode candle : root) {
+                if (!candle.isArray() || candle.size() < 9) {
+                    throw unavailable(
+                            "Binance.US 返回的日线格式不正确",
+                            null);
+                }
+                long openTime = candle.get(0).asLong();
+                candles.put(openTime, new DailyOhlcvResponse(
+                        symbol,
+                        Instant.ofEpochMilli(openTime)
+                                .atZone(ZoneOffset.UTC)
+                                .toLocalDate(),
+                        "UTC",
+                        openTime,
+                        candle.get(6).asLong(),
+                        decimal(candle, 1),
+                        decimal(candle, 2),
+                        decimal(candle, 3),
+                        decimal(candle, 4),
+                        decimal(candle, 5),
+                        candle.get(8).asLong(),
+                        "BINANCE_US"));
+            }
+            return candles;
 
         } catch (ResponseStatusException exception) {
             throw exception;

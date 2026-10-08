@@ -6,7 +6,8 @@ Tradedate 是一个基于 Java 17 和 Spring Boot 3.5.11 的比特币行情数�
 
 ## 主要功能
 
-- 拉取 Binance.US 的 1 分钟 BTCUSDT K 线数据；只写入已经收盘的 K 线，未收盘的会被跳过。
+- 拉取 Binance.US 的 1 分钟 BTCUSDT K 线数据；只写入已经收盘的 K 线。是否收盘按交易所的服务器时间（`/api/v3/time`）减 2 秒判断，而不是本机时钟。
+- 每日对账：把数据库按 UTC 日聚合出的开高低收、成交量和成交笔数，逐字段与交易所自己的日线比对，报告一致、不一致、数据不完整和交易所缺失的天数。
 - 通过 Kafka 异步入库，以 `(symbol, open_time)` 唯一索引做 upsert：重复投递不会产生重复行，修正后的 K 线会覆盖旧值。
 - 消费失败的记录按指数退避重试，仍失败则写入死信 topic；无法反序列化的记录直接进入死信 topic，不会卡住分区。
 - 查询 `HOURLY` 或 `DAILY` 聚合结果，每个桶附带实际/应有的分钟数和是否完整；结果通过 Redis cache-aside 缓存，新数据写入后相关缓存自动失效。
@@ -112,6 +113,7 @@ docker compose logs -f app
 | `GET /messages` | 检查应用是否响应 |
 | `GET /{symbol}/{startTime}/{endTime}` | 拉取指定区间的 1 分钟 K 线并发送到 Kafka |
 | `GET /api/aggregates/{period}/{symbol}/{startTime}/{endTime}` | 查询聚合数据；`period` 为 `HOURLY` 或 `DAILY` |
+| `GET /api/reconciliation/daily/{symbol}/{from}/{to}` | 对账；`from`、`to` 为 `YYYY-MM-DD` 格式的 UTC 日期（含两端），最多 366 天，且必须是已经结束的日期 |
 
 PowerShell 示例：
 
@@ -130,6 +132,12 @@ Invoke-RestMethod "http://localhost:8080/api/aggregates/HOURLY/BTCUSDT/$start/$e
 - `symbol` 只允许 2 到 20 位字母或数字；时间区间必须满足 `startTime < endTime`，且不超过 `BINANCE_MAX_RANGE`（默认 366 天）。不满足时返回 `400`。
 - 对 Binance.US 的请求最多并发 `BINANCE_MAX_CONCURRENT_REQUESTS` 个；遇到 `429`、`5xx` 或网络错误会退避重试（优先使用 `Retry-After`）。
 - 返回的数量是 Kafka 已确认接收的记录数，不含未收盘而被跳过的 K 线。只要有一个批次最终失败，就返回 `502`，并说明已发送多少条、多少个批次失败；已发送的记录可以通过重新请求同一区间安全补齐。
+
+对账接口只比较存满 1,440 分钟的日子；分钟数不足的记为 `INCOMPLETE`，不参与比较。数值按值比较（`1.5` 等于 `1.50000000`），成交笔数必须完全相等。返回的 `discrepancies` 只列出没有对上的日子及其不一致的字段。例如核对 2024 全年：
+
+```powershell
+Invoke-RestMethod "http://localhost:8080/api/reconciliation/daily/BTCUSDT/2024-01-01/2024-12-31"
+```
 
 聚合接口每个桶的 `candleCount` 是实际的分钟数，`expectedCandleCount` 是该桶在请求区间内应有的分钟数，`complete` 只有在两者相等且桶已经结束时为 `true`。完全没有数据的桶不会出现在结果中。
 
@@ -232,8 +240,8 @@ macOS/Linux：
 
 测试分两类：
 
-- 单元测试：Binance 响应映射、未收盘 K 线过滤、重试与输入校验、Kafka 发送失败、数据加载接口、Kimi 请求/响应和数据库完整性条件。
-- 集成测试（`PipelineIntegrationTest`）：用 Testcontainers 启动真实的 Kafka、PostgreSQL 和 Redis，覆盖重复投递幂等、修正 K 线覆盖旧值、乱序投递下的小时聚合、桶完整性、缓存 TTL、新数据写入后缓存失效，以及畸形消息进入死信 topic 且不阻塞后续消息。
+- 单元测试：Binance 响应映射、按交易所时钟过滤未收盘 K 线、重试与输入校验、Kafka 发送失败、对账的分类与校验、数据加载接口、Kimi 请求/响应和数据库完整性条件。
+- 集成测试（`PipelineIntegrationTest`）：用 Testcontainers 启动真实的 Kafka、PostgreSQL 和 Redis，覆盖重复投递幂等、修正 K 线覆盖旧值、乱序投递下的小时聚合、桶完整性、缓存 TTL、新数据写入后缓存失效、畸形消息进入死信 topic 且不阻塞后续消息，以及对账能发现被故意改坏的一根 K 线。
 
 集成测试需要本机运行 Docker；没有 Docker 时会被跳过而不是失败。尚未覆盖交互式终端循环和完整的 Kimi 回退链路。
 

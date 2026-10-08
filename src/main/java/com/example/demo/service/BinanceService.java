@@ -18,7 +18,6 @@ import org.springframework.web.client.RestTemplate;
 import org.springframework.web.util.UriComponentsBuilder;
 
 import java.math.BigDecimal;
-import java.time.Clock;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
@@ -42,11 +41,12 @@ public class BinanceService {
     private static final Pattern SYMBOL_PATTERN = Pattern.compile("[A-Z0-9]{2,20}");
     private static final Duration SEND_TIMEOUT = Duration.ofSeconds(30);
     private static final Duration MAX_RETRY_AFTER = Duration.ofSeconds(60);
+    /** Covers clock offset and request latency when deciding whether the exchange has closed a candle. */
+    private static final long FINALITY_MARGIN_MS = 2_000L;
 
     private final TradeDataProducer tradeDataProducer;
     private final RestTemplate restTemplate;
     private final ObjectMapper mapper;
-    private final Clock clock;
     private final String baseUrl;
     private final Duration maxRange;
     private final int maxAttempts;
@@ -57,7 +57,6 @@ public class BinanceService {
             TradeDataProducer tradeDataProducer,
             @Qualifier("restTemplate") RestTemplate restTemplate,
             ObjectMapper mapper,
-            Clock clock,
             @Value("${binance.api.base-url}") String baseUrl,
             @Value("${app.binance.max-range:P366D}") Duration maxRange,
             @Value("${app.binance.max-concurrent-requests:4}") int maxConcurrentRequests,
@@ -66,7 +65,6 @@ public class BinanceService {
         this.tradeDataProducer = tradeDataProducer;
         this.restTemplate = restTemplate;
         this.mapper = mapper;
-        this.clock = clock;
         this.baseUrl = baseUrl;
         this.maxRange = maxRange;
         this.maxAttempts = Math.max(1, maxAttempts);
@@ -99,13 +97,22 @@ public class BinanceService {
 
         long totalMinutes = ceilDiv(endTime - startTime, ONE_MINUTE_MS);
         int numberOfRequests = (int) ceilDiv(totalMinutes, MAX_PER_REQUEST);
-        long now = clock.millis();
+
+        // "Closed" is judged by the exchange's clock, not ours: a skewed local clock would
+        // otherwise admit candles the exchange is still updating.
+        long closedBefore;
+        try {
+            closedBefore = fetchExchangeTime() - FINALITY_MARGIN_MS;
+        } catch (Exception e) {
+            logger.warn("Could not read Binance server time for {}: {}", normalizedSymbol, firstLine(e));
+            throw new MarketDataLoadException(0, numberOfRequests, numberOfRequests);
+        }
 
         List<Future<Integer>> batches = new ArrayList<>(numberOfRequests);
         for (int chunkIndex = 0; chunkIndex < numberOfRequests; chunkIndex++) {
             long batchStart = startTime + (long) chunkIndex * MAX_PER_REQUEST * ONE_MINUTE_MS;
             long batchEnd = Math.min(batchStart + MAX_PER_REQUEST * ONE_MINUTE_MS, endTime);
-            batches.add(executor.submit(() -> loadBatch(normalizedSymbol, batchStart, batchEnd, now)));
+            batches.add(executor.submit(() -> loadBatch(normalizedSymbol, batchStart, batchEnd, closedBefore)));
         }
 
         int sent = 0;
@@ -128,7 +135,20 @@ public class BinanceService {
         return sent;
     }
 
-    private int loadBatch(String symbol, long batchStart, long batchEnd, long now) throws Exception {
+    private long fetchExchangeTime() throws Exception {
+        String url = UriComponentsBuilder
+                .fromUriString(baseUrl)
+                .path("/api/v3/time")
+                .build()
+                .toUriString();
+        JsonNode serverTime = mapper.readTree(fetchWithRetry(url)).path("serverTime");
+        if (!serverTime.canConvertToLong()) {
+            throw new IllegalStateException("Binance server time response has no serverTime");
+        }
+        return serverTime.asLong();
+    }
+
+    private int loadBatch(String symbol, long batchStart, long batchEnd, long closedBefore) throws Exception {
         String url = UriComponentsBuilder
                 .fromUriString(baseUrl)
                 .path("/api/v3/klines")
@@ -151,7 +171,7 @@ public class BinanceService {
         for (JsonNode klineNode : rootNode) {
             TradeData data = mapToTradeData(klineNode, symbol, batchStart, batchEnd);
             // A candle that has not closed yet is still changing; storing it would keep partial values.
-            if (data.getCloseTime() >= now) {
+            if (data.getCloseTime() >= closedBefore) {
                 unclosed++;
                 continue;
             }
