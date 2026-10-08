@@ -99,13 +99,13 @@ sudo chmod 600 /opt/tradedate/.env
    - 受众: `sts.amazonaws.com`
 2. IAM → 角色 → 创建角色 → 可信实体选 "Web 身份"。
    - 身份提供商: `token.actions.githubusercontent.com`, 受众: `sts.amazonaws.com`
-   - GitHub 组织: `chenziliang1`, 仓库: `Tradedate`, 分支: `fix/pipeline-correctness-and-reliability` (以后合并到 main, 就改成 `main`)
+   - GitHub 组织: `chenziliang1`, 仓库: `Tradedate`, 分支: `main`
    - 先不加权限策略, 角色名例如 `tradedate-github-deploy`。
 3. 打开这个角色 → 信任关系, 确认条件里有下面两行, 只允许这个仓库的这个分支:
 
    ```json
    "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
-   "token.actions.githubusercontent.com:sub": "repo:chenziliang1/Tradedate:ref:refs/heads/fix/pipeline-correctness-and-reliability"
+   "token.actions.githubusercontent.com:sub": "repo:chenziliang1/Tradedate:ref:refs/heads/main"
    ```
 
 4. 权限 → 添加权限 → 创建内联策略 → JSON, 只允许向这一台实例发命令:
@@ -140,7 +140,7 @@ sudo chmod 600 /opt/tradedate/.env
 | `AWS_REGION` | `us-east-2` |
 | `AWS_DEPLOY_ROLE_ARN` | 第 3 步角色的 ARN |
 | `EC2_INSTANCE_ID` | EC2 实例 ID |
-| `DEPLOY_BRANCH` | `fix/pipeline-correctness-and-reliability` |
+| `DEPLOY_BRANCH` | `main` |
 | `DEPLOY_ENABLED` | `true` |
 
 ### 5. 触发一次部署并验证
