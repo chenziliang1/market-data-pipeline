@@ -11,10 +11,14 @@ import org.springframework.test.web.servlet.MockMvc;
 
 import static org.hamcrest.Matchers.containsString;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
-@SpringBootTest(properties = "spring.kafka.listener.auto-startup=false")
+@SpringBootTest(properties = {
+        "spring.kafka.listener.auto-startup=false",
+        "spring.flyway.enabled=false",
+        "app.security.api-key=test-key"})
 @AutoConfigureMockMvc
 public class LoadControllerIntegrationTest {
 
@@ -33,10 +37,34 @@ public class LoadControllerIntegrationTest {
         Mockito.when(binanceService.load(symbol, startTime, endTime))
                 .thenReturn(2);
 
-        mvc.perform(get("/BTCUSDT/1697068382000/1697068502000"))
+        mvc.perform(post("/api/load/BTCUSDT/1697068382000/1697068502000").header("X-API-Key", "test-key"))
                 .andExpect(status().isOk())
                 .andExpect(content().string(containsString("2 records were sent to Kafka")));
 
         Mockito.verify(binanceService).load(symbol, startTime, endTime);
+    }
+
+    @Test
+    public void loadWithoutKeyIsRejected() throws Exception {
+        mvc.perform(post("/api/load/BTCUSDT/1697068382000/1697068502000"))
+                .andExpect(status().isUnauthorized());
+
+        Mockito.verifyNoInteractions(binanceService);
+    }
+
+    @Test
+    public void loadWithWrongKeyIsRejected() throws Exception {
+        mvc.perform(post("/api/load/BTCUSDT/1697068382000/1697068502000").header("X-API-Key", "test-kez"))
+                .andExpect(status().isUnauthorized());
+
+        Mockito.verifyNoInteractions(binanceService);
+    }
+
+    @Test
+    public void loadIsNotAvailableThroughGet() throws Exception {
+        mvc.perform(get("/api/load/BTCUSDT/1697068382000/1697068502000").header("X-API-Key", "test-key"))
+                .andExpect(status().isMethodNotAllowed());
+
+        Mockito.verifyNoInteractions(binanceService);
     }
 }

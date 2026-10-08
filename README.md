@@ -12,6 +12,7 @@ Tradedate 是一个基于 Java 17 和 Spring Boot 3.5.11 的比特币行情数�
 - consumer 以批量方式消费：每次 poll（最多 `KAFKA_MAX_POLL_RECORDS` 条，默认 500）用一条多行 upsert 写入。同一批里同一根 K 线出现多次时保留最后一个版本。
 - 消费失败的记录按指数退避重试，仍失败则写入死信 topic；无法反序列化或被数据库拒绝（如违反约束）的记录不重试，直接进入死信 topic。批量写入失败时会逐行重试找出那一条，同批其他记录照常写入，不会卡住分区。
 - 查询 `HOURLY` 或 `DAILY` 聚合结果，每个桶附带实际/应有的分钟数和是否完整；结果通过 Redis cache-aside 缓存，新数据写入后相关缓存自动失效。
+- 拉取接口和管理接口需要 `X-API-Key`；没有配置密钥时拒绝请求，而不是放行。
 - 使用 Docker Compose 启动应用、单节点 Kafka 和 Redis。
 - 可选启用 Kimi 交互式终端，查询已结束的单个 UTC 日期。
 
@@ -78,7 +79,10 @@ cp .env.example .env
 SPRING_DATASOURCE_URL=jdbc:postgresql://YOUR_DATABASE_HOST:5432/YOUR_DATABASE
 SPRING_DATASOURCE_USERNAME=YOUR_DATABASE_USERNAME
 SPRING_DATASOURCE_PASSWORD=YOUR_DATABASE_PASSWORD
+APP_API_KEY=YOUR_RANDOM_KEY
 ```
+
+`APP_API_KEY` 是调用拉取接口和管理接口时 `X-API-Key` 请求头要带的密钥，可以用 `openssl rand -hex 32` 生成。不设置时这些接口一律拒绝（返回 `503`），不会因为忘了配置而变成公开接口。
 
 `.env` 已被 Git 和 Docker 构建上下文忽略。不要把真实密码或 API Key 提交到仓库。
 
@@ -112,7 +116,7 @@ docker compose logs -f app
 | 方法和路径 | 用途 |
 | --- | --- |
 | `GET /messages` | 检查应用是否响应 |
-| `GET /{symbol}/{startTime}/{endTime}` | 拉取指定区间的 1 分钟 K 线并发送到 Kafka |
+| `POST /api/load/{symbol}/{startTime}/{endTime}` | 拉取指定区间的 1 分钟 K 线并发送到 Kafka；需要 `X-API-Key` 请求头 |
 | `GET /api/aggregates/{period}/{symbol}/{startTime}/{endTime}` | 查询聚合数据；`period` 为 `HOURLY` 或 `DAILY` |
 | `GET /api/reconciliation/daily/{symbol}/{from}/{to}` | 对账；`from`、`to` 为 `YYYY-MM-DD` 格式的 UTC 日期（含两端），最多 366 天，且必须是已经结束的日期 |
 
@@ -124,12 +128,14 @@ Invoke-RestMethod "http://localhost:8080/messages"
 $start = [DateTimeOffset]::UtcNow.AddMinutes(-5).ToUnixTimeMilliseconds()
 $end = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
 
-Invoke-RestMethod "http://localhost:8080/BTCUSDT/$start/$end"
+$headers = @{ "X-API-Key" = "YOUR_RANDOM_KEY" }
+Invoke-RestMethod -Method Post -Headers $headers "http://localhost:8080/api/load/BTCUSDT/$start/$end"
 Invoke-RestMethod "http://localhost:8080/api/aggregates/HOURLY/BTCUSDT/$start/$end"
 ```
 
 拉取接口的行为：
 
+- 拉取会写数据并调用交易所，所以是 `POST`，并且必须带正确的 `X-API-Key`，否则返回 `401`。查询类接口（聚合、对账、健康检查）不需要密钥。
 - `symbol` 只允许 2 到 20 位字母或数字；时间区间必须满足 `startTime < endTime`，且不超过 `BINANCE_MAX_RANGE`（默认 366 天）。不满足时返回 `400`。
 - 对 Binance.US 的请求最多并发 `BINANCE_MAX_CONCURRENT_REQUESTS` 个；遇到 `429`、`5xx` 或网络错误会退避重试（优先使用 `Retry-After`）。
 - 返回的数量是 Kafka 已确认接收的记录数，不含未收盘而被跳过的 K 线。只要有一个批次最终失败，就返回 `502`，并说明已发送多少条、多少个批次失败；已发送的记录可以通过重新请求同一区间安全补齐。
@@ -232,6 +238,7 @@ docker compose run --rm --build --env-from-file .env -e TERMINAL_CHAT_ENABLED=tr
 | `BINANCE_RETRY_BACKOFF` | 否 | `PT1S` | 重试的初始等待时间，之后每次翻倍 |
 | `AGGREGATE_CACHE_CLOSED_TTL` | 否 | `PT1H` | 区间已经结束的聚合结果缓存时间 |
 | `AGGREGATE_CACHE_OPEN_TTL` | 否 | `PT1M` | 区间延伸到当前时间之后的聚合结果缓存时间 |
+| `APP_API_KEY` | 调用拉取和管理接口时 | 空 | `X-API-Key` 请求头要带的密钥；为空时这些接口返回 `503` |
 | `MOONSHOT_API_KEY` | 仅终端 | 空 | Moonshot API Key |
 | `KIMI_API_URL` | 否 | `https://api.moonshot.ai/v1/chat/completions` | Kimi Chat Completions 地址 |
 | `KIMI_MODEL` | 否 | `kimi-k3` | Kimi 模型名 |

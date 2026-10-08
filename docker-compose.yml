@@ -43,6 +43,7 @@ services:
       KAFKA_CONSUMER_GROUP_ID: "${KAFKA_CONSUMER_GROUP_ID:-demo-trade-data-consumer}"
       REDIS_HOST: "redis"
       REDIS_PORT: "6379"
+      APP_API_KEY: "${APP_API_KEY:-}"
     depends_on:
       - kafka
       - redis

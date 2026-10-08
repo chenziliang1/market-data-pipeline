@@ -13,9 +13,17 @@ if [ ! -f .env ]; then
   exit 1
 fi
 
+if [ -s .env ] && [ -n "$(tail -c 1 .env)" ]; then echo >> .env; fi
+
+# The API key for the load and admin endpoints is generated on the host and never leaves it.
+if ! grep -q '^APP_API_KEY=.' .env; then
+  sed -i.bak '/^APP_API_KEY=/d' .env && rm -f .env.bak
+  echo "APP_API_KEY=$(openssl rand -hex 32)" >> .env
+  echo "Generated APP_API_KEY in $APP_DIR/.env"
+fi
+
 # Record the deployed image in .env, so docker compose commands run by hand on the host use it too.
 sed -i.bak '/^IMAGE=/d' .env && rm -f .env.bak
-if [ -s .env ] && [ -n "$(tail -c 1 .env)" ]; then echo >> .env; fi
 echo "IMAGE=$IMAGE" >> .env
 
 echo '__COMPOSE_B64__' | base64 -d | gunzip > docker-compose.yml
