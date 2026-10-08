@@ -10,7 +10,7 @@ Tradedate 是一个基于 Java 17 和 Spring Boot 3.5.11 的比特币行情数�
 - 每日对账：把数据库按 UTC 日聚合出的开高低收、成交量和成交笔数，逐字段与交易所自己的日线比对，报告一致、不一致、数据不完整和交易所缺失的天数。
 - 通过 Kafka 异步入库，以 `(symbol, open_time)` 唯一索引做 upsert：重复投递不会产生重复行，修正后的 K 线会覆盖旧值。
 - consumer 以批量方式消费：每次 poll（最多 `KAFKA_MAX_POLL_RECORDS` 条，默认 500）用一条多行 upsert 写入。同一批里同一根 K 线出现多次时保留最后一个版本。
-- 消费失败的记录按指数退避重试，仍失败则写入死信 topic；无法反序列化或被数据库拒绝（如违反约束）的记录不重试，直接进入死信 topic。批量写入失败时会逐行重试找出那一条，同批其他记录照常写入，不会卡住分区。
+- 消费失败的记录按指数退避重试，仍失败则写入死信 topic，之后可以通过管理接口查看并重放；无法反序列化或被数据库拒绝（如违反约束）的记录不重试，直接进入死信 topic。批量写入失败时会逐行重试找出那一条，同批其他记录照常写入，不会卡住分区。
 - 查询 `HOURLY` 或 `DAILY` 聚合结果，每个桶附带实际/应有的分钟数和是否完整；结果通过 Redis cache-aside 缓存，新数据写入后相关缓存自动失效。
 - 小时和日 K 线预聚合在 `candle_rollup` 表中，由 consumer 在写入分钟 K 线的同一个事务里更新；查询整桶直接读预聚合，只有区间两端不完整的桶才从分钟数据现算。
 - 数据库结构由 Flyway 迁移脚本管理，应用启动时自动执行。
@@ -119,6 +119,8 @@ docker compose logs -f app
 | `GET /messages` | 检查应用是否响应 |
 | `POST /api/load/{symbol}/{startTime}/{endTime}` | 拉取指定区间的 1 分钟 K 线并发送到 Kafka；需要 `X-API-Key` 请求头 |
 | `GET /api/aggregates/{period}/{symbol}/{startTime}/{endTime}` | 查询聚合数据；`period` 为 `HOURLY` 或 `DAILY` |
+| `GET /api/admin/dead-letters?limit=50` | 列出死信 topic 中还没处理的记录：失败原因、原始 topic 和 offset、已重放次数、能否重放；需要 `X-API-Key` |
+| `POST /api/admin/dead-letters/replay?limit=100` | 把还没处理的死信重新发回行情 topic；需要 `X-API-Key` |
 | `GET /api/reconciliation/daily/{symbol}/{from}/{to}` | 对账；`from`、`to` 为 `YYYY-MM-DD` 格式的 UTC 日期（含两端），最多 366 天，且必须是已经结束的日期 |
 
 PowerShell 示例：
@@ -169,6 +171,13 @@ Invoke-RestMethod "http://localhost:8080/api/aggregates/HOURLY/BTCUSDT/$start/$e
 ```powershell
 Invoke-RestMethod "http://localhost:8080/api/reconciliation/daily/BTCUSDT/2024-01-01/2024-12-31"
 ```
+
+死信重放：
+
+- 用一个单独的 consumer group（`<consumer group>-dlt-replay`）记录处理到哪里：之前的记录都已经重放或跳过，`GET` 只列出之后的。
+- 能解析成完整 K 线的记录会带着原来的 key 发回行情 topic，所以和同一个 symbol 的其他消息在同一个分区；等 Kafka 全部确认后才提交进度，发送失败就什么都不提交，下次重新处理。
+- 每次重放把 `x-replay-count` 加一。再次失败的记录会带着这个计数回到死信 topic，达到 `KAFKA_DLT_MAX_REPLAYS`（默认 3）后不再重放，避免一条坏消息无限循环。
+- 无法解析的记录（例如反序列化失败的原始字节）和超过次数的记录会被跳过：在返回结果里列出原因，之后不再出现在 `GET` 中，但仍保留在死信 topic 里，直到 Kafka 的保留期结束。
 
 聚合接口每个桶的 `candleCount` 是实际的分钟数，`expectedCandleCount` 是该桶在请求区间内应有的分钟数，`complete` 只有在两者相等且桶已经结束时为 `true`。完全没有数据的桶不会出现在结果中。
 
@@ -242,6 +251,7 @@ docker compose run --rm --build --env-from-file .env -e TERMINAL_CHAT_ENABLED=tr
 | `KAFKA_MAX_POLL_RECORDS` | 否 | `500` | 每次 poll 的最大条数，也是一条多行 upsert 的最大行数 |
 | `KAFKA_RETRY_MAX_RETRIES` | 否 | `3` | 写入失败后的重试次数，之后进入死信 topic |
 | `KAFKA_RETRY_INITIAL_INTERVAL` | 否 | `PT1S` | 第一次重试的等待时间，之后每次翻倍 |
+| `KAFKA_DLT_MAX_REPLAYS` | 否 | `3` | 一条死信最多被重放几次 |
 | `REDIS_HOST` | 否 | `localhost` | Redis 主机；Compose 内使用 `redis` |
 | `REDIS_PORT` | 否 | `6379` | Redis 端口 |
 | `BINANCE_API_BASE_URL` | 否 | `https://api.binance.us` | 拉取分钟 K 线和日线回退查询使用的 Binance.US API 根地址 |
@@ -274,7 +284,7 @@ macOS/Linux：
 测试分两类：
 
 - 单元测试：Binance 响应映射、按交易所时钟过滤未收盘 K 线、重试与输入校验、Kafka 发送失败、对账的分类与校验、数据加载接口、Kimi 请求/响应和数据库完整性条件。
-- 集成测试（`PipelineIntegrationTest`）：用 Testcontainers 启动真实的 Kafka、PostgreSQL 和 Redis，数据库结构由 Flyway 迁移创建，覆盖预聚合在修正和乱序投递后仍与分钟数据一致、不对齐的查询区间只统计区间内的分钟、重复投递幂等、修正 K 线覆盖旧值、乱序投递下的小时聚合、桶完整性、缓存 TTL、新数据写入后缓存失效、畸形消息进入死信 topic 且不阻塞后续消息、被数据库拒绝的一行进入死信 topic 而同批其他行照常写入、同一批里的修正版覆盖原版，以及对账能同时发现被故意改坏的一根分钟 K 线和因此脱节的预聚合。
+- 集成测试（`PipelineIntegrationTest`）：用 Testcontainers 启动真实的 Kafka、PostgreSQL 和 Redis，数据库结构由 Flyway 迁移创建，覆盖预聚合在修正和乱序投递后仍与分钟数据一致、不对齐的查询区间只统计区间内的分钟、重复投递幂等、修正 K 线覆盖旧值、乱序投递下的小时聚合、桶完整性、缓存 TTL、新数据写入后缓存失效、畸形消息进入死信 topic 且不阻塞后续消息、被数据库拒绝的一行进入死信 topic 而同批其他行照常写入、同一批里的修正版覆盖原版，对账能同时发现被故意改坏的一根分钟 K 线和因此脱节的预聚合，以及死信的查看和重放（可重放的写入成功，无法解析的和超过次数的被跳过，处理过的不再出现）。
 
 集成测试需要本机运行 Docker；没有 Docker 时会被跳过而不是失败。尚未覆盖交互式终端循环和完整的 Kimi 回退链路。
 

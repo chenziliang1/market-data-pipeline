@@ -1,12 +1,14 @@
 package com.example.demo;
 
 import com.example.demo.dto.DailyReconciliationReport;
+import com.example.demo.dto.DeadLetterReport;
 import com.example.demo.entity.AggregatedTradeData;
 import com.example.demo.entity.AggregationPeriod;
 import com.example.demo.entity.TradeData;
 import com.example.demo.mapper.AggregationMapper;
 import com.example.demo.service.AggregationService;
 import com.example.demo.service.DailyReconciliationService;
+import com.example.demo.service.DeadLetterService;
 import com.example.demo.service.TradeDataProducer;
 import org.apache.kafka.clients.admin.AdminClient;
 import org.apache.kafka.clients.admin.AdminClientConfig;
@@ -19,6 +21,7 @@ import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.common.serialization.ByteArrayDeserializer;
 import org.apache.kafka.common.serialization.StringDeserializer;
+import org.apache.kafka.common.serialization.ByteArraySerializer;
 import org.apache.kafka.common.serialization.StringSerializer;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -120,6 +123,9 @@ class PipelineIntegrationTest {
 
     @Autowired
     private AggregationMapper aggregationMapper;
+
+    @Autowired
+    private DeadLetterService deadLetterService;
 
     @Autowired
     @Qualifier("restTemplate")
@@ -319,6 +325,50 @@ class PipelineIntegrationTest {
                 "SELECT open_price FROM newtable WHERE symbol = ? AND open_time = ?",
                 BigDecimal.class, SYMBOL, HOUR_START);
         assertThat(stored).isEqualByComparingTo("999.99");
+    }
+
+    @Test
+    void deadLettersCanBeListedAndReplayed() throws Exception {
+        deadLetterService.replay(500); // acknowledge whatever earlier tests left behind
+        long minute = HOUR_START + 30 * MINUTE;
+        String candleJson = "{\"symbol\":\"%s\",\"openTime\":%d,\"openPrice\":1,\"highPrice\":1,"
+                + "\"lowPrice\":1,\"closePrice\":1,\"volume\":1,\"closeTime\":%d,\"numsOfTrade\":1}";
+        publishDeadLetter("REPLAYME", candleJson.formatted("REPLAYME", minute, minute + MINUTE - 1), null);
+        publishDeadLetter("GARBAGE", "not json", null);
+        publishDeadLetter("TOOMANY", candleJson.formatted("TOOMANY", minute, minute + MINUTE - 1), "3");
+
+        List<DeadLetterReport.DeadLetter> pending = deadLetterService.pending(50);
+        assertThat(pending)
+                .filteredOn(letter -> Set.of("REPLAYME", "GARBAGE", "TOOMANY").contains(letter.key()))
+                .extracting(DeadLetterReport.DeadLetter::key, DeadLetterReport.DeadLetter::replayable)
+                .containsExactly(
+                        org.assertj.core.groups.Tuple.tuple("REPLAYME", true),
+                        org.assertj.core.groups.Tuple.tuple("GARBAGE", false),
+                        org.assertj.core.groups.Tuple.tuple("TOOMANY", false));
+
+        DeadLetterReport.ReplayResult result = deadLetterService.replay(50);
+
+        assertThat(result.skipped()).extracting(DeadLetterReport.Skipped::key).contains("GARBAGE", "TOOMANY");
+        awaitRow("REPLAYME", minute);
+        assertThat(countRows("TOOMANY", minute)).as("past the replay limit").isZero();
+        assertThat(deadLetterService.pending(50))
+                .extracting(DeadLetterReport.DeadLetter::key)
+                .as("handled records are not offered again")
+                .doesNotContain("REPLAYME", "GARBAGE", "TOOMANY");
+    }
+
+    private void publishDeadLetter(String key, String value, String replayCount) throws Exception {
+        try (KafkaProducer<String, byte[]> rawProducer = new KafkaProducer<>(Map.of(
+                ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, KAFKA.getBootstrapServers(),
+                ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer.class,
+                ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, ByteArraySerializer.class))) {
+            ProducerRecord<String, byte[]> record =
+                    new ProducerRecord<>(DEAD_LETTER_TOPIC, key, value.getBytes(StandardCharsets.UTF_8));
+            if (replayCount != null) {
+                record.headers().add("x-replay-count", replayCount.getBytes(StandardCharsets.UTF_8));
+            }
+            rawProducer.send(record).get();
+        }
     }
 
     private void awaitDeadLetter(java.util.function.Predicate<String> matches) {
