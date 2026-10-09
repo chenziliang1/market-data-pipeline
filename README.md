@@ -62,16 +62,16 @@ PostgreSQL 是外部依赖；项目可以连接 Amazon RDS，也可以连接你�
 Windows PowerShell：
 
 ```powershell
-git clone https://github.com/chenziliang1/Tradedate.git
-Set-Location Tradedate
+git clone https://github.com/chenziliang1/market-data-pipeline.git
+Set-Location market-data-pipeline
 Copy-Item .env.example .env
 ```
 
 macOS/Linux：
 
 ```bash
-git clone https://github.com/chenziliang1/Tradedate.git
-cd Tradedate
+git clone https://github.com/chenziliang1/market-data-pipeline.git
+cd market-data-pipeline
 cp .env.example .env
 ```
 
@@ -295,7 +295,7 @@ macOS/Linux：
 GitHub Actions（`.github/workflows/ci.yml`）在每次 push 时：
 
 1. 运行全部测试；
-2. 测试通过后构建 Docker 镜像，推送到 `ghcr.io/chenziliang1/tradedate`，标签为 `sha-<commit>` 和分支名；
+2. 测试通过后构建 Docker 镜像，推送到 `ghcr.io/chenziliang1/market-data-pipeline`，标签为 `sha-<commit>` 和分支名；
 3. 可选：通过 AWS Systems Manager 让 EC2 以蓝绿方式切换到这个 commit 的镜像：新版本在空闲槽位启动，`/actuator/health` 通过（PostgreSQL 和 Redis 都可达）后 nginx 才切过去，再优雅停止旧版本。新版本起不来时任务失败，旧版本继续服务。在 EC2 上实测，部署期间每 0.2 秒一次的健康检查请求没有一次失败（改成蓝绿之前，每次部署约有 14 秒不可用）。
 
 第 3 步默认关闭，需要一次性配置 AWS（OIDC 角色、EC2 上的 Docker 和数据库配置），步骤见 [deploy/README.md](deploy/README.md)。部署不使用 SSH，GitHub 上不保存 AWS 密钥或数据库密码。

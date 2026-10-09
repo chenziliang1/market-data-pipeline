@@ -99,13 +99,13 @@ sudo chmod 600 /opt/tradedate/.env
    - 受众: `sts.amazonaws.com`
 2. IAM → 角色 → 创建角色 → 可信实体选 "Web 身份"。
    - 身份提供商: `token.actions.githubusercontent.com`, 受众: `sts.amazonaws.com`
-   - GitHub 组织: `chenziliang1`, 仓库: `Tradedate`, 分支: `main`
+   - GitHub 组织: `chenziliang1`, 仓库: `market-data-pipeline`, 分支: `main`
    - 先不加权限策略, 角色名例如 `tradedate-github-deploy`。
 3. 打开这个角色 → 信任关系, 确认条件里有下面两行, 只允许这个仓库的这个分支:
 
    ```json
    "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
-   "token.actions.githubusercontent.com:sub": "repo:chenziliang1/Tradedate:ref:refs/heads/main"
+   "token.actions.githubusercontent.com:sub": "repo:chenziliang1/market-data-pipeline:ref:refs/heads/main"
    ```
 
 4. 权限 → 添加权限 → 创建内联策略 → JSON, 只允许向这一台实例发命令:
@@ -153,7 +153,7 @@ sudo chmod 600 /opt/tradedate/.env
 ### 5. 触发一次部署并验证
 
 1. 往 `main` push 一个 commit; 或者在 Actions 里打开最近一次 CI → Re-run all jobs。
-2. `deploy` job 变绿, 日志里出现 `Active slot: ..., deploying ... to <槽位>`, `{"status":"UP"}` 和 `Deployed ghcr.io/chenziliang1/tradedate:sha-... to <槽位>`, 就说明部署成功了。
+2. `deploy` job 变绿, 日志里出现 `Active slot: ..., deploying ... to <槽位>`, `{"status":"UP"}` 和 `Deployed ghcr.io/chenziliang1/market-data-pipeline:sha-... to <槽位>`, 就说明部署成功了。
 3. 在 EC2 上确认:
 
    ```bash
