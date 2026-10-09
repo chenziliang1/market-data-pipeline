@@ -131,21 +131,28 @@ sudo chmod 600 /opt/tradedate/.env
    }
    ```
 
-### 4. 在 GitHub 上设置仓库变量
+### 4. 在 GitHub 上设置仓库变量和 secret
 
-仓库 → Settings → Secrets and variables → Actions → **Variables** 标签页 → New repository variable。这些都不是密钥, 用 Variables 即可:
+仓库 → Settings → Secrets and variables → Actions。
+
+**Variables** 标签页 → New repository variable:
 
 | 名称 | 值 |
 | :--- | :--- |
 | `AWS_REGION` | `us-east-2` |
-| `AWS_DEPLOY_ROLE_ARN` | 第 3 步角色的 ARN |
-| `EC2_INSTANCE_ID` | EC2 实例 ID |
 | `DEPLOY_BRANCH` | `main` |
 | `DEPLOY_ENABLED` | `true` |
 
+**Secrets** 标签页 → New repository secret。这两个不算密钥, 放在 secret 里是为了让日志显示成 `***`, 仓库公开时不暴露账号 ID 和实例 ID:
+
+| 名称 | 值 |
+| :--- | :--- |
+| `AWS_DEPLOY_ROLE_ARN` | 第 3 步角色的 ARN |
+| `EC2_INSTANCE_ID` | EC2 实例 ID |
+
 ### 5. 触发一次部署并验证
 
-1. 往这个分支 push 一个 commit; 或者在 Actions 里打开最近一次 CI → Re-run all jobs。
+1. 往 `main` push 一个 commit; 或者在 Actions 里打开最近一次 CI → Re-run all jobs。
 2. `deploy` job 变绿, 日志里出现 `Active slot: ..., deploying ... to <槽位>`, `{"status":"UP"}` 和 `Deployed ghcr.io/chenziliang1/tradedate:sha-... to <槽位>`, 就说明部署成功了。
 3. 在 EC2 上确认:
 
