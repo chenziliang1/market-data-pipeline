@@ -105,7 +105,13 @@ sudo chmod 600 /opt/tradedate/.env
 
    ```json
    "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
-   "token.actions.githubusercontent.com:sub": "repo:chenziliang1/market-data-pipeline:ref:refs/heads/main"
+   "token.actions.githubusercontent.com:sub": "repo:chenziliang1@<用户 ID>/market-data-pipeline@<仓库 ID>:ref:refs/heads/main"
+   ```
+
+   较新的仓库默认在 `sub` 里带上用户 ID 和仓库 ID, 仓库被删掉后别人用同名仓库也拿不到这个角色。仓库实际用的前缀可以这样查:
+
+   ```bash
+   gh api repos/chenziliang1/market-data-pipeline/actions/oidc/customization/sub --jq .sub_claim_prefix
    ```
 
 4. 权限 → 添加权限 → 创建内联策略 → JSON, 只允许向这一台实例发命令:
