@@ -210,12 +210,11 @@ docker compose down
 ```dotenv
 ANTHROPIC_API_KEY=YOUR_ANTHROPIC_API_KEY
 CLAUDE_API_URL=https://api.anthropic.com/v1/messages
-CLAUDE_MODEL=claude-sonnet-5-5
 TERMINAL_CHAT_ENABLED=true
 BINANCE_API_BASE_URL=https://api.binance.us
 ```
 
-除 `ANTHROPIC_API_KEY` 和 `TERMINAL_CHAT_ENABLED=true` 外，其余配置已有上述默认值；`CLAUDE_MODEL` 可以换成 `claude-opus-5-5`。终端问题会发送给 Anthropic 的 API，请不要在问题中输入密码、密钥或其他敏感信息。
+除 `ANTHROPIC_API_KEY` 和 `TERMINAL_CHAT_ENABLED=true` 外，其余配置已有上述默认值。默认使用 Claude Sonnet（模型名见 `application.properties` 的 `claude.model`），可以用 `CLAUDE_MODEL` 覆盖。终端问题会发送给 Anthropic 的 API，请不要在问题中输入密码、密钥或其他敏感信息。
 
 ### 2. 启动交互式应用
 
@@ -267,7 +266,7 @@ docker compose run --rm --build --env-from-file .env -e TERMINAL_CHAT_ENABLED=tr
 | `ANTHROPIC_API_KEY` | 仅终端 | 空 | Anthropic API Key |
 | `CLAUDE_API_URL` | 否 | `https://api.anthropic.com/v1/messages` | Anthropic Messages API 地址 |
 | `CLAUDE_API_VERSION` | 否 | `2023-06-01` | 请求头 `anthropic-version` 的值 |
-| `CLAUDE_MODEL` | 否 | `claude-sonnet-5-5` | Claude 模型名，也可以用 `claude-opus-5-5` |
+| `CLAUDE_MODEL` | 否 | Claude Sonnet（见 `application.properties`） | Claude 模型名 |
 | `TERMINAL_CHAT_ENABLED` | 否 | `false` | 是否启动交互式行情终端 |
 
 ## 本地测试
