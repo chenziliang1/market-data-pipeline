@@ -2,8 +2,8 @@ package com.example.demo.cli;
 
 import com.example.demo.dto.DailyOhlcvResponse;
 import com.example.demo.dto.ParsedMarketQuery;
-import com.example.demo.service.KimiAnalysisService;
-import com.example.demo.service.KimiIntentExtractionService;
+import com.example.demo.service.ClaudeAnalysisService;
+import com.example.demo.service.ClaudeIntentExtractionService;
 import com.example.demo.service.MarketDataQueryService;
 import org.springframework.boot.ApplicationArguments;
 import org.springframework.boot.ApplicationRunner;
@@ -23,22 +23,22 @@ import java.io.PrintWriter;
 public class MarketTerminalRunner
         implements ApplicationRunner {
 
-    private final KimiIntentExtractionService
+    private final ClaudeIntentExtractionService
             intentExtractionService;
 
     private final MarketDataQueryService
             marketDataQueryService;
 
-    private final KimiAnalysisService
-            kimiAnalysisService;
+    private final ClaudeAnalysisService
+            analysisService;
 
     public MarketTerminalRunner(
-            KimiIntentExtractionService
+            ClaudeIntentExtractionService
                     intentExtractionService,
             MarketDataQueryService
                     marketDataQueryService,
-            KimiAnalysisService
-                    kimiAnalysisService) {
+            ClaudeAnalysisService
+                    analysisService) {
 
         this.intentExtractionService =
                 intentExtractionService;
@@ -46,8 +46,8 @@ public class MarketTerminalRunner
         this.marketDataQueryService =
                 marketDataQueryService;
 
-        this.kimiAnalysisService =
-                kimiAnalysisService;
+        this.analysisService =
+                analysisService;
     }
 
     @Override
@@ -62,7 +62,7 @@ public class MarketTerminalRunner
                 new PrintWriter(System.out, true);
 
         output.println();
-        output.println("Kimi 比特币行情终端已启动。");
+        output.println("Claude 比特币行情终端已启动。");
         output.println("每个问题请包含一个日期。");
         output.println("昨天、前天等相对日期按照 UTC 解释。");
         output.println(
@@ -111,16 +111,16 @@ public class MarketTerminalRunner
 
                 try {
                     String analysis =
-                            kimiAnalysisService.analyze(
+                            analysisService.analyze(
                                     data,
                                     question);
 
-                    output.println("\nKimi 分析：");
+                    output.println("\nClaude 分析：");
                     output.println(analysis);
 
                 } catch (RuntimeException exception) {
                     output.println(
-                            "\n行情已查到，但 Kimi 分析失败："
+                            "\n行情已查到，但 Claude 分析失败："
                                     + userMessage(exception));
                 }
 

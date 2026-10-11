@@ -2,7 +2,7 @@
 
 Tradedate 是一个基于 Java 17 和 Spring Boot 3.5.11 的比特币行情数据服务。它可以从 Binance.US 拉取 1 分钟 OHLCV（K 线）数据，经 Kafka producer-consumer 链路异步写入 PostgreSQL，并通过 MyBatis 提供小时和日级聚合查询；聚合结果使用 Redis 缓存，新数据写入后自动失效。
 
-项目还提供一个可选的 Kimi 命令行行情助手：它可以从中英文问题中识别 BTCUSDT 和日期，优先使用数据库中的完整日线数据，不完整时回退到 Binance.US，并让 Kimi 基于已验证的数据生成中文分析。
+项目还提供一个可选的 Claude 命令行行情助手：它可以从中英文问题中识别 BTCUSDT 和日期，优先使用数据库中的完整日线数据，不完整时回退到 Binance.US，并让 Claude 基于已验证的数据生成中文分析。
 
 ## 主要功能
 
@@ -16,7 +16,7 @@ Tradedate 是一个基于 Java 17 和 Spring Boot 3.5.11 的比特币行情数�
 - 数据库结构由 Flyway 迁移脚本管理，应用启动时自动执行。
 - 拉取接口和管理接口需要 `X-API-Key`；没有配置密钥时拒绝请求，而不是放行。
 - 使用 Docker Compose 启动应用、单节点 Kafka 和 Redis。
-- 可选启用 Kimi 交互式终端，查询已结束的单个 UTC 日期。
+- 可选启用 Claude 交互式终端，查询已结束的单个 UTC 日期。
 
 ## 数据流
 
@@ -31,17 +31,17 @@ PostgreSQL (MyBatis) <- Kafka consumer <- trade-data topic
         +-> 小时/日聚合查询 -> Redis cache-aside
 ```
 
-Kimi 终端链路：
+Claude 终端链路：
 
 ```text
-自然语言问题 -> Kimi 提取 BTCUSDT/日期
+自然语言问题 -> Claude 提取 BTCUSDT/日期
                          |
                          v
 完整的数据库分钟数据 -> 日线聚合 ----+
 数据库不可用或数据不完整 -> Binance.US 日线
                                       |
                                       v
-                              Kimi 中文行情分析
+                              Claude 中文行情分析
 ```
 
 ## 前置条件
@@ -51,7 +51,7 @@ Kimi 终端链路：
 - Docker Desktop，或 Docker Engine + Docker Compose V2
 - 一个可访问的 PostgreSQL 14+ 数据库
 - 本机端口 `8080` 和 `9092` 未被占用
-- 能够访问 Binance.US；使用行情终端时还需 Moonshot API Key 和 Kimi API 网络访问
+- 能够访问 Binance.US；使用行情终端时还需 Anthropic API Key，并且能访问 `api.anthropic.com`
 
 PostgreSQL 是外部依赖；项目可以连接 Amazon RDS，也可以连接你自己准备的 PostgreSQL。如果使用 Amazon RDS，需要让 RDS 安全组的 PostgreSQL `5432` 入站规则允许当前电脑的公网 IP。不要为了省事开放给 `0.0.0.0/0`。
 
@@ -108,7 +108,7 @@ docker compose ps
 docker compose logs -f app
 ```
 
-首次构建需要从 Docker Hub 和 Maven Central 下载依赖。应用还需要能够访问 Binance.US 和 PostgreSQL。默认的 Compose 配置启用 HTTP 服务，不启用交互式 Kimi 终端。
+首次构建需要从 Docker Hub 和 Maven Central 下载依赖。应用还需要能够访问 Binance.US 和 PostgreSQL。默认的 Compose 配置启用 HTTP 服务，不启用交互式 Claude 终端。
 
 ### 4. 验证 HTTP API
 
@@ -199,7 +199,7 @@ docker compose down
 
 此 Compose 配置面向本地开发和演示：Redis 只用作可重建缓存；Kafka 是单节点、无认证且没有持久化 volume，删除容器后消息和 offset 可能丢失。业务数据保存在外部 PostgreSQL 中。
 
-## 使用 Kimi 行情终端
+## 使用 Claude 行情终端
 
 终端模式目前只支持 `BTCUSDT`，并且每次问题必须对应一个已经结束的 UTC 日期。相对日期（如“昨天”“前天”）也按 UTC 解释，问题长度不能超过 2000 个字符。
 
@@ -208,14 +208,14 @@ docker compose down
 在本机 `.env` 中添加：
 
 ```dotenv
-MOONSHOT_API_KEY=YOUR_MOONSHOT_API_KEY
-KIMI_API_URL=https://api.moonshot.ai/v1/chat/completions
-KIMI_MODEL=kimi-k3
+ANTHROPIC_API_KEY=YOUR_ANTHROPIC_API_KEY
+CLAUDE_API_URL=https://api.anthropic.com/v1/messages
+CLAUDE_MODEL=claude-sonnet-5-5
 TERMINAL_CHAT_ENABLED=true
 BINANCE_API_BASE_URL=https://api.binance.us
 ```
 
-除 `MOONSHOT_API_KEY` 和 `TERMINAL_CHAT_ENABLED=true` 外，其余配置已有上述默认值。终端问题会发送给 Moonshot/Kimi，请不要在问题中输入密码、密钥或其他敏感信息。
+除 `ANTHROPIC_API_KEY` 和 `TERMINAL_CHAT_ENABLED=true` 外，其余配置已有上述默认值；`CLAUDE_MODEL` 可以换成 `claude-opus-5-5`。终端问题会发送给 Anthropic 的 API，请不要在问题中输入密码、密钥或其他敏感信息。
 
 ### 2. 启动交互式应用
 
@@ -235,7 +235,9 @@ docker compose run --rm --build --env-from-file .env -e TERMINAL_CHAT_ENABLED=tr
 
 输入 `exit`、`quit` 或 `退出` 可退出问答模式；Spring Boot 仍会继续运行，按 `Ctrl+C` 停止应用。
 
-查询时，应用只有在数据库恰好包含该 UTC 日完整的 1440 条分钟数据时才使用数据库日聚合，否则回退到 Binance.US 日线接口；回退结果仅用于本次查询，不会自动写回数据库。Kimi 会收到原始问题，并只根据应用提供的已验证行情生成分析；结果仅供参考，不构成投资建议。
+查询时，应用只有在数据库恰好包含该 UTC 日完整的 1440 条分钟数据时才使用数据库日聚合，否则回退到 Binance.US 日线接口；回退结果仅用于本次查询，不会自动写回数据库。Claude 会收到原始问题，并只根据应用提供的已验证行情生成分析；结果仅供参考，不构成投资建议。
+
+问题解析用的是 Anthropic Messages API 的结构化输出（`output_config.format`，类型 `json_schema`）：应用给出 `symbol`、`date`、`error` 三个字段的 JSON Schema，模型的回答保证符合这个结构，不需要从自由文本里截取；代码随后再独立校验标的白名单和日期，模型把“今天”当成有效日期时也会被拒绝。分析那一步是普通的文本回复。
 
 ## 配置参考
 
@@ -262,9 +264,10 @@ docker compose run --rm --build --env-from-file .env -e TERMINAL_CHAT_ENABLED=tr
 | `AGGREGATE_CACHE_CLOSED_TTL` | 否 | `PT1H` | 区间已经结束的聚合结果缓存时间 |
 | `AGGREGATE_CACHE_OPEN_TTL` | 否 | `PT1M` | 区间延伸到当前时间之后的聚合结果缓存时间 |
 | `APP_API_KEY` | 调用拉取和管理接口时 | 空 | `X-API-Key` 请求头要带的密钥；为空时这些接口返回 `503` |
-| `MOONSHOT_API_KEY` | 仅终端 | 空 | Moonshot API Key |
-| `KIMI_API_URL` | 否 | `https://api.moonshot.ai/v1/chat/completions` | Kimi Chat Completions 地址 |
-| `KIMI_MODEL` | 否 | `kimi-k3` | Kimi 模型名 |
+| `ANTHROPIC_API_KEY` | 仅终端 | 空 | Anthropic API Key |
+| `CLAUDE_API_URL` | 否 | `https://api.anthropic.com/v1/messages` | Anthropic Messages API 地址 |
+| `CLAUDE_API_VERSION` | 否 | `2023-06-01` | 请求头 `anthropic-version` 的值 |
+| `CLAUDE_MODEL` | 否 | `claude-sonnet-5-5` | Claude 模型名，也可以用 `claude-opus-5-5` |
 | `TERMINAL_CHAT_ENABLED` | 否 | `false` | 是否启动交互式行情终端 |
 
 ## 本地测试
@@ -283,10 +286,10 @@ macOS/Linux：
 
 测试分两类：
 
-- 单元测试：Binance 响应映射、按交易所时钟过滤未收盘 K 线、重试与输入校验、Kafka 发送失败、对账的分类与校验、数据加载接口、Kimi 请求/响应和数据库完整性条件。
+- 单元测试：Binance 响应映射、按交易所时钟过滤未收盘 K 线、重试与输入校验、Kafka 发送失败、对账的分类与校验、数据加载接口、Claude 请求/响应（结构化输出的请求体、请求头、回复不是 JSON 时报 502、模型接受“今天”时代码仍拒绝）和数据库完整性条件。
 - 集成测试（`PipelineIntegrationTest`）：用 Testcontainers 启动真实的 Kafka、PostgreSQL 和 Redis，数据库结构由 Flyway 迁移创建，覆盖预聚合在修正和乱序投递后仍与分钟数据一致、不对齐的查询区间只统计区间内的分钟、重复投递幂等、修正 K 线覆盖旧值、乱序投递下的小时聚合、桶完整性、缓存 TTL、新数据写入后缓存失效、畸形消息进入死信 topic 且不阻塞后续消息、被数据库拒绝的一行进入死信 topic 而同批其他行照常写入、同一批里的修正版覆盖原版，对账能同时发现被故意改坏的一根分钟 K 线和因此脱节的预聚合，以及死信的查看和重放（可重放的写入成功，无法解析的和超过次数的被跳过，处理过的不再出现）。
 
-集成测试需要本机运行 Docker；没有 Docker 时会被跳过而不是失败。尚未覆盖交互式终端循环和完整的 Kimi 回退链路。
+集成测试需要本机运行 Docker；没有 Docker 时会被跳过而不是失败。尚未覆盖交互式终端循环和完整的 Claude 回退链路。
 
 每次 push 和 pull request 都会通过 GitHub Actions（`.github/workflows/ci.yml`）运行全部测试。
 

@@ -1,8 +1,8 @@
 package com.example.demo.service;
 
+import com.example.demo.dto.ClaudeMessageRequest;
+import com.example.demo.dto.ClaudeMessageResponse;
 import com.example.demo.dto.DailyOhlcvResponse;
-import com.example.demo.dto.KimiChatRequest;
-import com.example.demo.dto.KimiChatResponse;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
@@ -14,7 +14,7 @@ import org.springframework.web.server.ResponseStatusException;
 import java.util.List;
 
 @Service
-public class KimiAnalysisService {
+public class ClaudeAnalysisService {
 
     private static final int MAX_QUESTION_LENGTH = 2000;
 
@@ -23,14 +23,14 @@ public class KimiAnalysisService {
     private final String apiKey;
     private final String model;
 
-    public KimiAnalysisService(
-            @Qualifier("kimiRestTemplate")
+    public ClaudeAnalysisService(
+            @Qualifier("claudeRestTemplate")
             RestTemplate restTemplate,
-            @Value("${kimi.api.url}")
+            @Value("${claude.api.url}")
             String apiUrl,
-            @Value("${kimi.api.key}")
+            @Value("${claude.api.key}")
             String apiKey,
-            @Value("${kimi.model}")
+            @Value("${claude.model}")
             String model) {
 
         this.restTemplate = restTemplate;
@@ -46,32 +46,29 @@ public class KimiAnalysisService {
         if (apiKey == null || apiKey.isBlank()) {
             throw new ResponseStatusException(
                     HttpStatus.SERVICE_UNAVAILABLE,
-                    "未配置 MOONSHOT_API_KEY");
+                    "未配置 ANTHROPIC_API_KEY");
         }
 
         String normalizedQuestion =
                 normalizeQuestion(question);
 
-        KimiChatRequest request =
-                new KimiChatRequest(
+        ClaudeMessageRequest request =
+                new ClaudeMessageRequest(
                         model,
-                        "low",
                         1024,
+                        """
+                        你是比特币历史行情分析助手。
+
+                        请使用简体中文回答。
+
+                        只能使用应用程序提供的、已经验证的行情数据。
+                        不得编造实时价格、新闻、事件原因或投资收益。
+                        必须明确说明数据日期、UTC 时区和数据来源。
+                        请将分析控制在 300 个汉字以内。
+                        最后提醒用户这不是投资建议。
+                        """,
                         List.of(
-                                new KimiChatRequest.Message(
-                                        "system",
-                                        """
-                                        你是比特币历史行情分析助手。
-
-                                        请使用简体中文回答。
-
-                                        只能使用应用程序提供的、已经验证的行情数据。
-                                        不得编造实时价格、新闻、事件原因或投资收益。
-                                        必须明确说明数据日期、UTC 时区和数据来源。
-                                        请将分析控制在 300 个汉字以内。
-                                        最后提醒用户这不是投资建议。
-                                        """),
-                                new KimiChatRequest.Message(
+                                new ClaudeMessageRequest.Message(
                                         "user",
                                         buildPrompt(
                                                 marketData,
@@ -79,35 +76,23 @@ public class KimiAnalysisService {
                         null);
 
         try {
-            KimiChatResponse response =
+            ClaudeMessageResponse response =
                     restTemplate.postForObject(
                             apiUrl,
                             request,
-                            KimiChatResponse.class);
+                            ClaudeMessageResponse.class);
 
-            if (response == null
-                    || response.choices() == null
-                    || response.choices().isEmpty()
-                    || response.choices().get(0).message() == null
-                    || response.choices()
-                    .get(0)
-                    .message()
-                    .content() == null
-                    || response.choices()
-                    .get(0)
-                    .message()
-                    .content()
-                    .isBlank()) {
+            String analysis = response == null
+                    ? null
+                    : response.firstText();
 
+            if (analysis == null) {
                 throw new ResponseStatusException(
                         HttpStatus.BAD_GATEWAY,
-                        "Kimi 没有返回分析结果");
+                        "Claude 没有返回分析结果");
             }
 
-            return response.choices()
-                    .get(0)
-                    .message()
-                    .content();
+            return analysis;
 
         } catch (ResponseStatusException exception) {
             throw exception;
@@ -115,7 +100,7 @@ public class KimiAnalysisService {
         } catch (RestClientException exception) {
             throw new ResponseStatusException(
                     HttpStatus.BAD_GATEWAY,
-                    "Kimi 分析请求失败",
+                    "Claude 分析请求失败",
                     exception);
         }
     }

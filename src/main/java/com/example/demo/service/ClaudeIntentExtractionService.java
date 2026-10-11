@@ -1,7 +1,7 @@
 package com.example.demo.service;
 
-import com.example.demo.dto.KimiChatRequest;
-import com.example.demo.dto.KimiChatResponse;
+import com.example.demo.dto.ClaudeMessageRequest;
+import com.example.demo.dto.ClaudeMessageResponse;
 import com.example.demo.dto.ParsedMarketQuery;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -22,8 +22,14 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 
+/**
+ * Turns a free-text question into one (symbol, completed UTC date) query. The request
+ * asks for structured output against a JSON schema, so the answer is always a JSON object
+ * with exactly the fields symbol, date and error; the code then validates the symbol and
+ * the date itself rather than trusting the model.
+ */
 @Service
-public class KimiIntentExtractionService {
+public class ClaudeIntentExtractionService {
 
     private static final int MAX_QUESTION_LENGTH = 2000;
     private static final String SUPPORTED_SYMBOL = "BTCUSDT";
@@ -34,15 +40,15 @@ public class KimiIntentExtractionService {
     private final String apiKey;
     private final String model;
 
-    public KimiIntentExtractionService(
-            @Qualifier("kimiRestTemplate")
+    public ClaudeIntentExtractionService(
+            @Qualifier("claudeRestTemplate")
             RestTemplate restTemplate,
             ObjectMapper objectMapper,
-            @Value("${kimi.api.url}")
+            @Value("${claude.api.url}")
             String apiUrl,
-            @Value("${kimi.api.key}")
+            @Value("${claude.api.key}")
             String apiKey,
-            @Value("${kimi.model}")
+            @Value("${claude.model}")
             String model) {
 
         this.restTemplate = restTemplate;
@@ -88,37 +94,26 @@ public class KimiIntentExtractionService {
                   must be YYYY-MM-DD.
                 """.formatted(currentUtcDate);
 
-        KimiChatRequest request =
-                new KimiChatRequest(
+        ClaudeMessageRequest request =
+                new ClaudeMessageRequest(
                         model,
-                        "low",
                         512,
+                        systemPrompt,
                         List.of(
-                                new KimiChatRequest.Message(
-                                        "system",
-                                        systemPrompt),
-                                new KimiChatRequest.Message(
+                                new ClaudeMessageRequest.Message(
                                         "user",
                                         normalizedQuestion)),
-                        responseFormat());
+                        outputConfig());
 
         try {
-            KimiChatResponse response =
+            ClaudeMessageResponse response =
                     restTemplate.postForObject(
                             apiUrl,
                             request,
-                            KimiChatResponse.class);
+                            ClaudeMessageResponse.class);
 
             ExtractionPayload payload =
-                    objectMapper.readValue(
-                            extractContent(response),
-                            ExtractionPayload.class);
-
-            if (payload == null) {
-                throw new ResponseStatusException(
-                        HttpStatus.BAD_GATEWAY,
-                        "Kimi 没有返回有效查询参数");
-            }
+                    parsePayload(response);
 
             if (hasText(payload.error())) {
                 throw badRequest(
@@ -143,21 +138,16 @@ public class KimiIntentExtractionService {
         } catch (ResponseStatusException exception) {
             throw exception;
 
-        } catch (JsonProcessingException exception) {
-            throw new ResponseStatusException(
-                    HttpStatus.BAD_GATEWAY,
-                    "Kimi 返回的查询参数无法解析",
-                    exception);
-
         } catch (RestClientException exception) {
             throw new ResponseStatusException(
                     HttpStatus.BAD_GATEWAY,
-                    "Kimi 参数提取请求失败",
+                    "Claude 参数提取请求失败",
                     exception);
         }
     }
 
-    private Map<String, Object> responseFormat() {
+    /** Structured output: the model's text must match this JSON schema. */
+    private Map<String, Object> outputConfig() {
         Map<String, Object> properties =
                 new LinkedHashMap<>();
 
@@ -194,16 +184,11 @@ public class KimiIntentExtractionService {
                 "additionalProperties",
                 false);
 
-        Map<String, Object> jsonSchema =
-                new LinkedHashMap<>();
-
-        jsonSchema.put("name", "market_query");
-        jsonSchema.put("strict", true);
-        jsonSchema.put("schema", schema);
-
         return Map.of(
-                "type", "json_schema",
-                "json_schema", jsonSchema);
+                "format",
+                Map.of(
+                        "type", "json_schema",
+                        "schema", schema));
     }
 
     private String normalizeQuestion(String question) {
@@ -227,32 +212,43 @@ public class KimiIntentExtractionService {
         if (apiKey == null || apiKey.isBlank()) {
             throw new ResponseStatusException(
                     HttpStatus.SERVICE_UNAVAILABLE,
-                    "未配置 MOONSHOT_API_KEY");
+                    "未配置 ANTHROPIC_API_KEY");
         }
     }
 
-    private String extractContent(
-            KimiChatResponse response) {
+    private ExtractionPayload parsePayload(
+            ClaudeMessageResponse response) {
 
-        if (response == null
-                || response.choices() == null
-                || response.choices().isEmpty()
-                || response.choices().get(0).message() == null
-                || !hasText(
-                response.choices()
-                        .get(0)
-                        .message()
-                        .content())) {
+        String text = response == null
+                ? null
+                : response.firstText();
 
+        if (text == null) {
             throw new ResponseStatusException(
                     HttpStatus.BAD_GATEWAY,
-                    "Kimi 没有返回查询参数");
+                    "Claude 没有返回查询参数");
         }
 
-        return response.choices()
-                .get(0)
-                .message()
-                .content();
+        try {
+            ExtractionPayload payload =
+                    objectMapper.readValue(
+                            text,
+                            ExtractionPayload.class);
+
+            if (payload == null) {
+                throw new ResponseStatusException(
+                        HttpStatus.BAD_GATEWAY,
+                        "Claude 没有返回有效查询参数");
+            }
+
+            return payload;
+
+        } catch (JsonProcessingException exception) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_GATEWAY,
+                    "Claude 返回的查询参数无法解析",
+                    exception);
+        }
     }
 
     private String normalizeSymbol(String rawSymbol) {
@@ -290,7 +286,7 @@ public class KimiIntentExtractionService {
 
         } catch (DateTimeParseException exception) {
             throw badRequest(
-                    "Kimi 未返回 YYYY-MM-DD 格式的日期，请重新表述");
+                    "Claude 未返回 YYYY-MM-DD 格式的日期，请重新表述");
         }
     }
 

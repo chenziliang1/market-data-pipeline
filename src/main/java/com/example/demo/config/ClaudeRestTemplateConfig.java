@@ -8,11 +8,12 @@ import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.web.client.RestTemplate;
 
 @Configuration
-public class KimiRestTemplateConfig {
+public class ClaudeRestTemplateConfig {
 
-    @Bean("kimiRestTemplate")
-    public RestTemplate kimiRestTemplate(
-            @Value("${kimi.api.key}") String apiKey) {
+    @Bean("claudeRestTemplate")
+    public RestTemplate claudeRestTemplate(
+            @Value("${claude.api.key}") String apiKey,
+            @Value("${claude.api.version}") String apiVersion) {
 
         SimpleClientHttpRequestFactory factory =
                 new SimpleClientHttpRequestFactory();
@@ -25,8 +26,10 @@ public class KimiRestTemplateConfig {
         restTemplate.getInterceptors().add(
                 (request, body, execution) -> {
                     if (apiKey != null && !apiKey.isBlank()) {
-                        request.getHeaders().setBearerAuth(apiKey);
+                        request.getHeaders().set("x-api-key", apiKey);
                     }
+
+                    request.getHeaders().set("anthropic-version", apiVersion);
 
                     request.getHeaders()
                             .setContentType(MediaType.APPLICATION_JSON);
