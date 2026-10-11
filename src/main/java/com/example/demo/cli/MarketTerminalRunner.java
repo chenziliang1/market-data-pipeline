@@ -1,5 +1,6 @@
 package com.example.demo.cli;
 
+import com.example.demo.dto.AnalysisResult;
 import com.example.demo.dto.DailyOhlcvResponse;
 import com.example.demo.dto.ParsedMarketQuery;
 import com.example.demo.service.ClaudeAnalysisService;
@@ -110,13 +111,20 @@ public class MarketTerminalRunner
                 printMarketData(output, data);
 
                 try {
-                    String analysis =
+                    AnalysisResult result =
                             analysisService.analyze(
                                     data,
                                     question);
 
                     output.println("\nClaude 分析：");
-                    output.println(analysis);
+                    output.println(result.analysis());
+
+                    if (!result.passed()) {
+                        output.println(
+                                "\n程序校验未通过，请只参考上面的行情数据：");
+                        result.problems().forEach(
+                                problem -> output.println("- " + problem));
+                    }
 
                 } catch (RuntimeException exception) {
                     output.println(

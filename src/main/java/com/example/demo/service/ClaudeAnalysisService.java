@@ -1,5 +1,6 @@
 package com.example.demo.service;
 
+import com.example.demo.dto.AnalysisResult;
 import com.example.demo.dto.ClaudeMessageRequest;
 import com.example.demo.dto.ClaudeMessageResponse;
 import com.example.demo.dto.DailyOhlcvResponse;
@@ -13,6 +14,11 @@ import org.springframework.web.server.ResponseStatusException;
 
 import java.util.List;
 
+/**
+ * Asks the model for a short narrative about one verified daily candle. The range and the
+ * change are computed in code and given to the model, and the answer is checked by
+ * {@link AnalysisGuard} before it is returned.
+ */
 @Service
 public class ClaudeAnalysisService {
 
@@ -39,7 +45,7 @@ public class ClaudeAnalysisService {
         this.model = model;
     }
 
-    public String analyze(
+    public AnalysisResult analyze(
             DailyOhlcvResponse marketData,
             String question) {
 
@@ -52,6 +58,9 @@ public class ClaudeAnalysisService {
         String normalizedQuestion =
                 normalizeQuestion(question);
 
+        AnalysisGuard.Metrics metrics =
+                AnalysisGuard.metrics(marketData);
+
         ClaudeMessageRequest request =
                 new ClaudeMessageRequest(
                         model,
@@ -61,7 +70,9 @@ public class ClaudeAnalysisService {
 
                         请使用简体中文回答。
 
-                        只能使用应用程序提供的、已经验证的行情数据。
+                        只能使用应用程序提供的、已经验证的行情数据和指标。
+                        只引用消息里给出的数字，可以四舍五入，
+                        不要自己计算新的数字或百分比。
                         不得编造实时价格、新闻、事件原因或投资收益。
                         必须明确说明数据日期、UTC 时区和数据来源。
                         请将分析控制在 300 个汉字以内。
@@ -72,6 +83,7 @@ public class ClaudeAnalysisService {
                                         "user",
                                         buildPrompt(
                                                 marketData,
+                                                metrics,
                                                 normalizedQuestion))),
                         null);
 
@@ -92,7 +104,9 @@ public class ClaudeAnalysisService {
                         "Claude 没有返回分析结果");
             }
 
-            return analysis;
+            return new AnalysisResult(
+                    analysis,
+                    AnalysisGuard.check(marketData, metrics, analysis));
 
         } catch (ResponseStatusException exception) {
             throw exception;
@@ -125,6 +139,7 @@ public class ClaudeAnalysisService {
 
     private String buildPrompt(
             DailyOhlcvResponse data,
+            AnalysisGuard.Metrics metrics,
             String question) {
 
         return """
@@ -142,6 +157,13 @@ public class ClaudeAnalysisService {
                 volume: %s BTC
                 tradeCount: %s
 
+                程序计算的指标（直接引用，可以四舍五入）：
+
+                range: %s USDT（最高减最低）
+                rangePct: %s%%（range 占开盘价的比例）
+                change: %s USDT（收盘减开盘，负数表示下跌）
+                changePct: %s%%（change 占开盘价的比例）
+
                 用户原始问题：
                 %s
                 """.formatted(
@@ -155,6 +177,10 @@ public class ClaudeAnalysisService {
                 data.close().toPlainString(),
                 data.volume().toPlainString(),
                 data.tradeCount(),
+                metrics.range().toPlainString(),
+                metrics.rangePct().toPlainString(),
+                metrics.change().toPlainString(),
+                metrics.changePct().toPlainString(),
                 question);
     }
 }

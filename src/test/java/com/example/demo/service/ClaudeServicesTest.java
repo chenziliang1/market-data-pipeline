@@ -1,6 +1,7 @@
 package com.example.demo.service;
 
 import com.example.demo.config.ClaudeRestTemplateConfig;
+import com.example.demo.dto.AnalysisResult;
 import com.example.demo.dto.DailyOhlcvResponse;
 import com.example.demo.dto.ParsedMarketQuery;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -18,6 +19,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.header;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.jsonPath;
@@ -156,6 +158,8 @@ class ClaudeServicesTest {
                 .andExpect(jsonPath("$.model").value(MODEL))
                 .andExpect(jsonPath("$.max_tokens").value(1024))
                 .andExpect(jsonPath("$.system").exists())
+                .andExpect(jsonPath("$.messages[0].content")
+                        .value(org.hamcrest.Matchers.containsString("rangePct: 20.00%")))
                 .andExpect(jsonPath("$.output_config").doesNotExist())
                 .andRespond(withSuccess(
                         textResponse("行情分析结果"),
@@ -168,11 +172,12 @@ class ClaudeServicesTest {
                         "test-key",
                         MODEL);
 
-        String result = service.analyze(
+        AnalysisResult result = service.analyze(
                 sampleMarketData(),
                 "请分析当天行情");
 
-        assertEquals("行情分析结果", result);
+        assertEquals("行情分析结果", result.analysis());
+        assertFalse(result.passed(), "a bare sentence must fail the deterministic checks");
         server.verify();
     }
 

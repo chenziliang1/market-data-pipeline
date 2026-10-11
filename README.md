@@ -16,7 +16,7 @@ Tradedate 是一个基于 Java 17 和 Spring Boot 3.5.11 的比特币行情数�
 - 数据库结构由 Flyway 迁移脚本管理，应用启动时自动执行。
 - 拉取接口和管理接口需要 `X-API-Key`；没有配置密钥时拒绝请求，而不是放行。
 - 使用 Docker Compose 启动应用、单节点 Kafka 和 Redis。
-- 可选启用 Claude 交互式终端，查询已结束的单个 UTC 日期。
+- 可选启用 Claude 交互式终端，查询已结束的单个 UTC 日期。振幅和涨跌幅由程序算好交给模型；模型的分析经过确定性校验（只能引用程序给出的数字，必须写明日期、UTC、来源和免责声明，不超过 300 个汉字），另有一组固定问题的 eval 作为发布门槛。
 
 ## 数据流
 
@@ -234,9 +234,21 @@ docker compose run --rm --build --env-from-file .env -e TERMINAL_CHAT_ENABLED=tr
 
 输入 `exit`、`quit` 或 `退出` 可退出问答模式；Spring Boot 仍会继续运行，按 `Ctrl+C` 停止应用。
 
-查询时，应用只有在数据库恰好包含该 UTC 日完整的 1440 条分钟数据时才使用数据库日聚合，否则回退到 Binance.US 日线接口；回退结果仅用于本次查询，不会自动写回数据库。Claude 会收到原始问题，并只根据应用提供的已验证行情生成分析；结果仅供参考，不构成投资建议。
+查询时，应用只有在数据库恰好包含该 UTC 日完整的 1440 条分钟数据时才使用数据库日聚合，否则回退到 Binance.US 日线接口；回退结果仅用于本次查询，不会自动写回数据库。Claude 会收到原始问题、已验证的行情，以及程序算好的振幅、涨跌幅和它们占开盘价的百分比，并只根据这些生成分析；结果仅供参考，不构成投资建议。分析返回后，`AnalysisGuard` 会做确定性校验：文中每个价格和百分比都必须是程序提供的值（允许四舍五入），必须写明日期、UTC 和数据来源，必须有“不是投资建议”的提醒，汉字不超过 300 个。校验不通过时终端仍显示分析，但会列出问题并提示只参考行情数据。
 
 问题解析用的是 Anthropic Messages API 的结构化输出（`output_config.format`，类型 `json_schema`）：应用给出 `symbol`、`date`、`error` 三个字段的 JSON Schema，模型的回答保证符合这个结构，不需要从自由文本里截取；代码随后再独立校验标的白名单和日期，模型把“今天”当成有效日期时也会被拒绝。分析那一步是普通的文本回复。
+
+## 助手的评估（发布门槛）
+
+`ClaudeLiveEvalTest` 用真实 API 跑一组固定题，作为改 prompt、换模型或升级后的发布门槛。它只在设置了 `ANTHROPIC_API_KEY` 时运行，CI 里没有这个变量，所以不会跑；一次大约 37 次 Sonnet 调用。
+
+```bash
+ANTHROPIC_API_KEY=YOUR_ANTHROPIC_API_KEY ./mvnw test -Dtest=ClaudeLiveEvalTest -Dsurefire.failIfNoSpecifiedTests=false
+```
+
+- **问题解析**（`src/test/resources/eval/intent-questions.json`，27 题）：中英文的明确日期、`2024/01/02` 和 `2024.1.2` 这类写法、昨天/前天/去年这类相对日期、没写标的时默认 BTCUSDT；以及必须拒绝的情况：今天、未来、日期范围、没有日期、以太坊等其他标的、无效日期，和两条试图改写规则的注入式提问。每题要么得到期望的 `symbol` 和日期，要么在期望拒绝时被拒绝。
+- **分析**（`src/test/resources/eval/analysis-days.json`，5 个真实交易日 × 2 种问法）：每条回复都要通过 `AnalysisGuard` 的全部确定性检查。
+- 通过率低于阈值（默认都是 90%，可用 `-Deval.intent.threshold` 和 `-Deval.analysis.threshold` 调整）时测试失败。逐题结果写到 `target/eval-report.md`，分析原文折叠在报告里。
 
 ## 配置参考
 
@@ -285,8 +297,10 @@ macOS/Linux：
 
 测试分两类：
 
-- 单元测试：Binance 响应映射、按交易所时钟过滤未收盘 K 线、重试与输入校验、Kafka 发送失败、对账的分类与校验、数据加载接口、Claude 请求/响应（结构化输出的请求体、请求头、回复不是 JSON 时报 502、模型接受“今天”时代码仍拒绝）和数据库完整性条件。
+- 单元测试：Binance 响应映射、按交易所时钟过滤未收盘 K 线、重试与输入校验、Kafka 发送失败、对账的分类与校验、数据加载接口、Claude 请求/响应（结构化输出的请求体、请求头、回复不是 JSON 时报 502、模型接受“今天”时代码仍拒绝）、分析文本的确定性校验（指标计算、只能引用程序给出的数字、缺少日期/时区/来源/免责声明、超长）和数据库完整性条件。
 - 集成测试（`PipelineIntegrationTest`）：用 Testcontainers 启动真实的 Kafka、PostgreSQL 和 Redis，数据库结构由 Flyway 迁移创建，覆盖预聚合在修正和乱序投递后仍与分钟数据一致、不对齐的查询区间只统计区间内的分钟、重复投递幂等、修正 K 线覆盖旧值、乱序投递下的小时聚合、桶完整性、缓存 TTL、新数据写入后缓存失效、畸形消息进入死信 topic 且不阻塞后续消息、被数据库拒绝的一行进入死信 topic 而同批其他行照常写入、同一批里的修正版覆盖原版，对账能同时发现被故意改坏的一根分钟 K 线和因此脱节的预聚合，以及死信的查看和重放（可重放的写入成功，无法解析的和超过次数的被跳过，处理过的不再出现）。
+
+- 发布门槛（`ClaudeLiveEvalTest`）：调用真实 API，需要 `ANTHROPIC_API_KEY`，没有时自动跳过，见“助手的评估”。
 
 集成测试需要本机运行 Docker；没有 Docker 时会被跳过而不是失败。尚未覆盖交互式终端循环和完整的 Claude 回退链路。
 
