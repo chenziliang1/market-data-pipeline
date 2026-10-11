@@ -38,11 +38,11 @@ class AnalysisGuardTest {
     @Test
     void analysisThatOnlyCitesSuppliedFiguresPasses() {
         String analysis = """
-                数据说明：BTCUSDT 日线，日期 2024-01-02，UTC，来源 DATABASE。
-                开盘 43,998.83，最高 45889.62，最低 43,961.25，收盘 44,953.7。
-                振幅约 1,928 USDT，约 4.4%；收盘较开盘上涨约 954.91 USDT，涨幅 2.17%。
-                成交量约 399.57 BTC，成交 54,282 笔。
-                以上不是投资建议。
+                Data: BTCUSDT daily candle for January 2, 2024 (UTC), source DATABASE.
+                It opened at 43,998.83, reached a high of 45889.62 and a low of 43,961.25, and closed at 44,953.7.
+                The range was about 1,928 USDT, roughly 4.4% of the open; the close was about 954.91 USDT
+                above the open, a gain of 2.17%. Volume was about 399.57 BTC across 54,282 trades.
+                This is not investment advice.
                 """;
 
         assertThat(AnalysisGuard.check(DAY, METRICS, analysis)).isEmpty();
@@ -51,35 +51,35 @@ class AnalysisGuardTest {
     @Test
     void wrongPriceAndInventedPercentageAreFlagged() {
         String analysis = """
-                2024年1月2日（UTC）BTCUSDT，来源 DATABASE。
-                开盘 43,998.83，收盘 44,955.00，收盘位于区间 51% 处。
-                这不是投资建议。
+                BTCUSDT on 2 January 2024 (UTC), source DATABASE.
+                It opened at 43,998.83 and closed at 44,955.00, finishing at 51% of the day's range.
+                This is not investment advice.
                 """;
 
         List<String> problems = AnalysisGuard.check(DAY, METRICS, analysis);
 
         assertThat(problems).containsExactlyInAnyOrder(
-                "引用了程序没有提供的数字: 44,955.00",
-                "引用了程序没有提供的数字: 51%");
+                "cites a number the application did not supply: 44,955.00",
+                "cites a number the application did not supply: 51%");
     }
 
     @Test
     void missingDateTimezoneSourceAndDisclaimerAreFlagged() {
-        List<String> problems = AnalysisGuard.check(DAY, METRICS, "当天小幅上涨。");
+        List<String> problems = AnalysisGuard.check(DAY, METRICS, "The day closed slightly higher.");
 
         assertThat(problems).containsExactlyInAnyOrder(
-                "没有写明数据日期 2024-01-02",
-                "没有写明 UTC 时区",
-                "没有写明数据来源 DATABASE",
-                "缺少 \"不是投资建议\" 的提醒");
+                "the date 2024-01-02 is not stated",
+                "the UTC timezone is not stated",
+                "the data source DATABASE is not stated",
+                "the \"not investment advice\" reminder is missing");
     }
 
     @Test
     void overlongAnalysisIsFlagged() {
-        // "不是投资建议" is 6 CJK characters, so 295 more make 301.
-        String analysis = "2024-01-02 UTC DATABASE 不是投资建议 " + "涨".repeat(295);
+        // The fixed phrase is 6 words, so 195 more make 201.
+        String analysis = "2024-01-02 UTC DATABASE not investment advice. " + "up ".repeat(195);
 
         assertThat(AnalysisGuard.check(DAY, METRICS, analysis))
-                .containsExactly("超过 300 个汉字 (301)");
+                .containsExactly("longer than 200 words (201)");
     }
 }

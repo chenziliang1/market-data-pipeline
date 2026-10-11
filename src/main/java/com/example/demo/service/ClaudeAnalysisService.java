@@ -24,6 +24,20 @@ public class ClaudeAnalysisService {
 
     private static final int MAX_QUESTION_LENGTH = 2000;
 
+    private static final String SYSTEM_PROMPT = """
+            You are a Bitcoin historical market-data assistant.
+
+            Answer in English.
+
+            Use only the verified market data and the metrics supplied by the
+            application. Quote only the numbers given in the message (rounding is
+            fine); do not compute new figures or percentages of your own.
+            Do not invent live prices, news, causes or investment returns.
+            State the data date, the UTC timezone and the data source explicitly.
+            Keep the analysis under %d words.
+            End by reminding the user that this is not investment advice.
+            """.formatted(AnalysisGuard.MAX_WORDS);
+
     private final RestTemplate restTemplate;
     private final String apiUrl;
     private final String apiKey;
@@ -52,7 +66,7 @@ public class ClaudeAnalysisService {
         if (apiKey == null || apiKey.isBlank()) {
             throw new ResponseStatusException(
                     HttpStatus.SERVICE_UNAVAILABLE,
-                    "未配置 ANTHROPIC_API_KEY");
+                    "ANTHROPIC_API_KEY is not configured");
         }
 
         String normalizedQuestion =
@@ -65,19 +79,7 @@ public class ClaudeAnalysisService {
                 new ClaudeMessageRequest(
                         model,
                         1024,
-                        """
-                        你是比特币历史行情分析助手。
-
-                        请使用简体中文回答。
-
-                        只能使用应用程序提供的、已经验证的行情数据和指标。
-                        只引用消息里给出的数字，可以四舍五入，
-                        不要自己计算新的数字或百分比。
-                        不得编造实时价格、新闻、事件原因或投资收益。
-                        必须明确说明数据日期、UTC 时区和数据来源。
-                        请将分析控制在 300 个汉字以内。
-                        最后提醒用户这不是投资建议。
-                        """,
+                        SYSTEM_PROMPT,
                         List.of(
                                 new ClaudeMessageRequest.Message(
                                         "user",
@@ -101,7 +103,7 @@ public class ClaudeAnalysisService {
             if (analysis == null) {
                 throw new ResponseStatusException(
                         HttpStatus.BAD_GATEWAY,
-                        "Claude 没有返回分析结果");
+                        "Claude returned no analysis");
             }
 
             return new AnalysisResult(
@@ -114,14 +116,14 @@ public class ClaudeAnalysisService {
         } catch (RestClientException exception) {
             throw new ResponseStatusException(
                     HttpStatus.BAD_GATEWAY,
-                    "Claude 分析请求失败",
+                    "The Claude analysis request failed",
                     exception);
         }
     }
 
     private String normalizeQuestion(String question) {
         if (question == null || question.isBlank()) {
-            return "请简要分析当天的价格表现和波动。";
+            return "Briefly describe the day's price action and volatility.";
         }
 
         String normalized = question.trim();
@@ -129,9 +131,9 @@ public class ClaudeAnalysisService {
         if (normalized.length() > MAX_QUESTION_LENGTH) {
             throw new ResponseStatusException(
                     HttpStatus.BAD_REQUEST,
-                    "问题不能超过 "
+                    "The question may not exceed "
                             + MAX_QUESTION_LENGTH
-                            + " 个字符");
+                            + " characters");
         }
 
         return normalized;
@@ -143,7 +145,7 @@ public class ClaudeAnalysisService {
             String question) {
 
         return """
-                已验证的比特币日线行情：
+                Verified Bitcoin daily candle:
 
                 symbol: %s
                 date: %s
@@ -157,14 +159,14 @@ public class ClaudeAnalysisService {
                 volume: %s BTC
                 tradeCount: %s
 
-                程序计算的指标（直接引用，可以四舍五入）：
+                Metrics computed by the application (quote them directly; rounding is fine):
 
-                range: %s USDT（最高减最低）
-                rangePct: %s%%（range 占开盘价的比例）
-                change: %s USDT（收盘减开盘，负数表示下跌）
-                changePct: %s%%（change 占开盘价的比例）
+                range: %s USDT (high minus low)
+                rangePct: %s%% (range as a share of the open)
+                change: %s USDT (close minus open; negative means a decline)
+                changePct: %s%% (change as a share of the open)
 
-                用户原始问题：
+                The user's original question:
                 %s
                 """.formatted(
                 data.symbol(),

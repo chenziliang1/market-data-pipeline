@@ -51,7 +51,7 @@ class ClaudeLiveEvalTest {
 
     private static final List<String> ANALYSIS_QUESTIONS = List.of(
             "",
-            "这天波动大吗，收盘比开盘高还是低？");
+            "Was this a volatile day, and did it close above or below the open?");
 
     private final ObjectMapper objectMapper = new ObjectMapper();
 
@@ -77,6 +77,7 @@ class ClaudeLiveEvalTest {
 
         // --- intent extraction -------------------------------------------------
         List<IntentCase> cases = load("eval/intent-questions.json", new TypeReference<>() {});
+        assertThat(cases).as("intent question set").hasSizeGreaterThanOrEqualTo(27);
         int intentPassed = 0;
         report.append("## Intent extraction\n\n| # | tag | question | expected | got | pass |\n|---|---|---|---|---|---|\n");
 
@@ -112,7 +113,7 @@ class ClaudeLiveEvalTest {
         List<DayFixture> days = load("eval/analysis-days.json", new TypeReference<>() {});
         int analysisTotal = 0;
         int analysisPassed = 0;
-        report.append("## Analysis\n\n| date | question | CJK chars | problems |\n|---|---|---|---|\n");
+        report.append("## Analysis\n\n| date | question | words | problems |\n|---|---|---|---|\n");
 
         for (DayFixture day : days) {
             DailyOhlcvResponse data = day.toResponse();
@@ -120,14 +121,14 @@ class ClaudeLiveEvalTest {
             for (String question : ANALYSIS_QUESTIONS) {
                 analysisTotal++;
                 AnalysisResult result = analyses.analyze(data, question);
-                long cjk = result.analysis().chars().filter(ch -> ch >= 0x4e00 && ch <= 0x9fff).count();
+                int words = result.analysis().trim().split("\\s+").length;
 
                 if (result.passed()) {
                     analysisPassed++;
                 }
 
                 report.append(String.format("| %s | %s | %d | %s |%n",
-                        day.date(), question.isEmpty() ? "(默认)" : question, cjk,
+                        day.date(), question.isEmpty() ? "(default)" : question, words,
                         result.passed() ? "none" : "**" + String.join("; ", result.problems()) + "**"));
                 report.append("\n<details><summary>text</summary>\n\n")
                         .append(result.analysis().replace("\n", "\n> ")).append("\n\n</details>\n\n");

@@ -73,7 +73,7 @@ public class BinanceDailyMarketService {
                     || root.isEmpty()) {
 
                 throw unavailable(
-                        "Binance.US 没有返回该日期的行情",
+                        "Binance.US returned no candle for that date",
                         null);
             }
 
@@ -85,7 +85,7 @@ public class BinanceDailyMarketService {
                     || candle.get(6).asLong() != endTime - 1) {
 
                 throw unavailable(
-                        "Binance.US 返回的日线时间不正确",
+                        "Binance.US returned a daily candle with unexpected times",
                         null);
             }
 
@@ -108,12 +108,12 @@ public class BinanceDailyMarketService {
 
         } catch (RestClientException exception) {
             throw unavailable(
-                    "请求 Binance.US 失败",
+                    "The request to Binance.US failed",
                     exception);
 
         } catch (Exception exception) {
             throw unavailable(
-                    "Binance.US 返回的数据无法解析",
+                    "Binance.US returned data that could not be parsed",
                     exception);
         }
     }
@@ -145,7 +145,7 @@ public class BinanceDailyMarketService {
 
             if (root == null || !root.isArray()) {
                 throw unavailable(
-                        "Binance.US 返回的日线格式不正确",
+                        "Binance.US returned daily candles in an unexpected format",
                         null);
             }
 
@@ -153,7 +153,7 @@ public class BinanceDailyMarketService {
             for (JsonNode candle : root) {
                 if (!candle.isArray() || candle.size() < 9) {
                     throw unavailable(
-                            "Binance.US 返回的日线格式不正确",
+                            "Binance.US returned daily candles in an unexpected format",
                             null);
                 }
                 long openTime = candle.get(0).asLong();
@@ -180,12 +180,12 @@ public class BinanceDailyMarketService {
 
         } catch (RestClientException exception) {
             throw unavailable(
-                    "请求 Binance.US 失败",
+                    "The request to Binance.US failed",
                     exception);
 
         } catch (Exception exception) {
             throw unavailable(
-                    "Binance.US 返回的数据无法解析",
+                    "Binance.US returned data that could not be parsed",
                     exception);
         }
     }

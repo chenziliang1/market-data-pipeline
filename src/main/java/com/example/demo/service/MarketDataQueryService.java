@@ -92,7 +92,7 @@ public class MarketDataQueryService {
 
         } catch (DataAccessException exception) {
             logger.warn(
-                    "数据库查询失败，改用 Binance.US：{} {}",
+                    "Database query failed, falling back to Binance.US: {} {}",
                     normalizedSymbol,
                     date,
                     exception);
@@ -115,7 +115,7 @@ public class MarketDataQueryService {
         if (!SUPPORTED_SYMBOL.equals(normalized)) {
             throw new ResponseStatusException(
                     HttpStatus.BAD_REQUEST,
-                    "目前只支持 BTCUSDT");
+                    "Only BTCUSDT is supported");
         }
 
         return normalized;
@@ -125,7 +125,7 @@ public class MarketDataQueryService {
         if (date == null) {
             throw new ResponseStatusException(
                     HttpStatus.BAD_REQUEST,
-                    "必须提供日期");
+                    "A date is required");
         }
 
         if (!date.isBefore(
@@ -133,7 +133,7 @@ public class MarketDataQueryService {
 
             throw new ResponseStatusException(
                     HttpStatus.BAD_REQUEST,
-                    "只能查询已经结束的 UTC 日期");
+                    "Only completed UTC days can be queried");
         }
     }
 

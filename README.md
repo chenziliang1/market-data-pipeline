@@ -1,65 +1,64 @@
 # Tradedate
 
-Tradedate 是一个基于 Java 17 和 Spring Boot 3.5.11 的比特币行情数据服务。它可以从 Binance.US 拉取 1 分钟 OHLCV（K 线）数据，经 Kafka producer-consumer 链路异步写入 PostgreSQL，并通过 MyBatis 提供小时和日级聚合查询；聚合结果使用 Redis 缓存，新数据写入后自动失效。
+Tradedate is a Bitcoin market-data service built on Java 17 and Spring Boot 3.5.11. It fetches one-minute OHLCV candles from Binance.US, writes them to PostgreSQL asynchronously through a Kafka producer/consumer pipeline, and serves hourly and daily aggregates through MyBatis. Aggregates are cached in Redis and invalidated automatically when new data is written.
 
-项目还提供一个可选的 Claude 命令行行情助手：它可以从中英文问题中识别 BTCUSDT 和日期，优先使用数据库中的完整日线数据，不完整时回退到 Binance.US，并让 Claude 基于已验证的数据生成中文分析。
+The project also ships an optional Claude command-line assistant: it extracts BTCUSDT and a date from a question written in English or Chinese, prefers the complete daily data in the database, falls back to Binance.US when the day is incomplete, and has Claude write a short analysis from the verified figures only.
 
-## 主要功能
+## Features
 
-- 拉取 Binance.US 的 1 分钟 BTCUSDT K 线数据；只写入已经收盘的 K 线。是否收盘按交易所的服务器时间（`/api/v3/time`）减 2 秒判断，而不是本机时钟。
-- 每日对账：把数据库按 UTC 日聚合出的开高低收、成交量和成交笔数，逐字段与交易所自己的日线比对，报告一致、不一致、数据不完整和交易所缺失的天数。
-- 通过 Kafka 异步入库，以 `(symbol, open_time)` 唯一索引做 upsert：重复投递不会产生重复行，修正后的 K 线会覆盖旧值。
-- consumer 以批量方式消费：每次 poll（最多 `KAFKA_MAX_POLL_RECORDS` 条，默认 500）用一条多行 upsert 写入。同一批里同一根 K 线出现多次时保留最后一个版本。
-- 消费失败的记录按指数退避重试，仍失败则写入死信 topic，之后可以通过管理接口查看并重放；无法反序列化或被数据库拒绝（如违反约束）的记录不重试，直接进入死信 topic。批量写入失败时会逐行重试找出那一条，同批其他记录照常写入，不会卡住分区。
-- 查询 `HOURLY` 或 `DAILY` 聚合结果，每个桶附带实际/应有的分钟数和是否完整；结果通过 Redis cache-aside 缓存，新数据写入后相关缓存自动失效。
-- 小时和日 K 线预聚合在 `candle_rollup` 表中，由 consumer 在写入分钟 K 线的同一个事务里更新；查询整桶直接读预聚合，只有区间两端不完整的桶才从分钟数据现算。
-- 数据库结构由 Flyway 迁移脚本管理，应用启动时自动执行。
-- 拉取接口和管理接口需要 `X-API-Key`；没有配置密钥时拒绝请求，而不是放行。
-- 使用 Docker Compose 启动应用、单节点 Kafka 和 Redis。
-- 可选启用 Claude 交互式终端，查询已结束的单个 UTC 日期。振幅和涨跌幅由程序算好交给模型；模型的分析经过确定性校验（只能引用程序给出的数字，必须写明日期、UTC、来源和免责声明，不超过 300 个汉字），另有一组固定问题的 eval 作为发布门槛。
+- Fetches one-minute BTCUSDT candles from Binance.US and stores only closed candles. Whether a candle is closed is judged by the exchange's server time (`/api/v3/time`) minus two seconds, not by the local clock.
+- Daily reconciliation: aggregates the stored minutes per UTC day (open, high, low, close, volume, trade count), compares every field with the exchange's own daily candle, and reports matched, mismatched, incomplete and missing days.
+- Asynchronous writes through Kafka with an upsert on the `(symbol, open_time)` unique index: redelivered messages never create duplicate rows, and corrected candles overwrite the old values.
+- The consumer writes in batches: every poll (up to `KAFKA_MAX_POLL_RECORDS` records, default 500) becomes one multi-row upsert. When the same candle appears more than once in a batch, the last version wins.
+- Records that fail to be written are retried with exponential backoff and then sent to a dead-letter topic, where they can be listed and replayed through the admin API. Records that cannot be deserialized or that the database rejects (for example, a constraint violation) go to the dead-letter topic without retries. When a batch write fails, the rows are retried one by one to find the offender; the rest of the batch is written normally and the partition is not blocked.
+- `HOURLY` or `DAILY` aggregates, each bucket reporting its actual and expected minute count and whether it is complete; results are served through a Redis cache-aside layer that is invalidated when new data arrives.
+- Hourly and daily candles are pre-aggregated in the `candle_rollup` table, which the consumer refreshes in the same transaction as the minute writes. Whole buckets are read from the rollups; only the partial buckets at the edges of a range are computed from the minute rows.
+- The database schema is managed by Flyway migrations that run at application start.
+- The load and admin endpoints require an `X-API-Key`; when no key is configured they refuse requests instead of letting them through.
+- Docker Compose starts the application, a single-node Kafka and Redis.
+- Optional Claude interactive terminal for a single completed UTC day. The range and the change are computed in code and handed to the model; the model's analysis goes through deterministic checks (it may only cite the figures it was given, must state the date, UTC, the source and a disclaimer, and must stay under 200 words), and a fixed question set serves as the release gate.
 
-## 数据流
+## Data flow
 
-HTTP 数据链路：
+HTTP pipeline:
 
 ```text
-HTTP 请求 -> Spring Boot -> Binance.US Kline API -> Kafka producer
-                                                   |
-                                                   v
+HTTP request -> Spring Boot -> Binance.US Kline API -> Kafka producer
+                                                      |
+                                                      v
 PostgreSQL (MyBatis) <- Kafka consumer <- trade-data topic
         |
-        +-> 小时/日聚合查询 -> Redis cache-aside
+        +-> hourly/daily aggregates -> Redis cache-aside
 ```
 
-Claude 终端链路：
+Claude terminal:
 
 ```text
-自然语言问题 -> Claude 提取 BTCUSDT/日期
-                         |
-                         v
-完整的数据库分钟数据 -> 日线聚合 ----+
-数据库不可用或数据不完整 -> Binance.US 日线
-                                      |
-                                      v
-                              Claude 中文行情分析
+natural-language question -> Claude extracts BTCUSDT and the date
+                                        |
+                                        v
+complete minute data in the database -> daily aggregate ----+
+database unavailable or day incomplete -> Binance.US daily  |
+                                                            v
+                                            Claude market analysis
 ```
 
-## 前置条件
+## Prerequisites
 
 - Git
-- Java 17（仅本地 Maven 运行需要）
-- Docker Desktop，或 Docker Engine + Docker Compose V2
-- 一个可访问的 PostgreSQL 14+ 数据库
-- 本机端口 `8080` 和 `9092` 未被占用
-- 能够访问 Binance.US；使用行情终端时还需 Anthropic API Key，并且能访问 `api.anthropic.com`
+- Java 17 (only for running Maven locally)
+- Docker Desktop, or Docker Engine with Docker Compose V2
+- A reachable PostgreSQL 14+ database
+- Local ports `8080` and `9092` free
+- Network access to Binance.US; the terminal also needs an Anthropic API key and access to `api.anthropic.com`
 
-PostgreSQL 是外部依赖；项目可以连接 Amazon RDS，也可以连接你自己准备的 PostgreSQL。如果使用 Amazon RDS，需要让 RDS 安全组的 PostgreSQL `5432` 入站规则允许当前电脑的公网 IP。不要为了省事开放给 `0.0.0.0/0`。
+PostgreSQL is an external dependency: the service can use Amazon RDS or any PostgreSQL you run yourself. With Amazon RDS, the RDS security group must allow inbound PostgreSQL (`5432`) from your machine's public IP. Do not open it to `0.0.0.0/0` for convenience.
 
-## 快速开始：Docker Compose
+## Quick start: Docker Compose
 
-### 1. 克隆仓库并配置环境变量
+### 1. Clone the repository and configure the environment
 
-Windows PowerShell：
+Windows PowerShell:
 
 ```powershell
 git clone https://github.com/chenziliang1/market-data-pipeline.git
@@ -67,7 +66,7 @@ Set-Location market-data-pipeline
 Copy-Item .env.example .env
 ```
 
-macOS/Linux：
+macOS/Linux:
 
 ```bash
 git clone https://github.com/chenziliang1/market-data-pipeline.git
@@ -75,7 +74,7 @@ cd market-data-pipeline
 cp .env.example .env
 ```
 
-编辑本机的 `.env`，填入真实数据库连接信息：
+Edit the local `.env` and fill in the real database connection:
 
 ```dotenv
 SPRING_DATASOURCE_URL=jdbc:postgresql://YOUR_DATABASE_HOST:5432/YOUR_DATABASE
@@ -84,22 +83,22 @@ SPRING_DATASOURCE_PASSWORD=YOUR_DATABASE_PASSWORD
 APP_API_KEY=YOUR_RANDOM_KEY
 ```
 
-`APP_API_KEY` 是调用拉取接口和管理接口时 `X-API-Key` 请求头要带的密钥，可以用 `openssl rand -hex 32` 生成。不设置时这些接口一律拒绝（返回 `503`），不会因为忘了配置而变成公开接口。
+`APP_API_KEY` is the value the `X-API-Key` header must carry when calling the load and admin endpoints; generate one with `openssl rand -hex 32`. When it is unset those endpoints refuse every request with `503`, so a forgotten setting cannot turn them into public endpoints.
 
-`.env` 已被 Git 和 Docker 构建上下文忽略。不要把真实密码或 API Key 提交到仓库。
+`.env` is ignored by Git and by the Docker build context. Never commit real passwords or API keys.
 
-如果 PostgreSQL 安装在运行 Docker 的同一台电脑上，数据库主机不要写 `localhost`，因为容器内的 `localhost` 指向应用容器本身。Windows/macOS 通常可使用 `host.docker.internal`；Linux 请使用容器能够访问的宿主机地址。
+If PostgreSQL runs on the same machine as Docker, do not use `localhost` as the database host: inside the container, `localhost` is the application container itself. On Windows and macOS use `host.docker.internal`; on Linux use a host address the container can reach.
 
-### 2. 初始化数据库
+### 2. Initialize the database
 
-不需要手动建表。应用启动时，Flyway 会执行 [`src/main/resources/db/migration`](src/main/resources/db/migration) 下的迁移脚本：
+No manual table creation is needed. At start-up, Flyway runs the migrations in [`src/main/resources/db/migration`](src/main/resources/db/migration):
 
-- `V1__trade_data.sql`：分钟 K 线表 `newtable` 和 `(symbol, open_time)` 唯一索引。该索引是 Kafka 重复投递时 `ON CONFLICT` 幂等写入所必需的。
-- `V2__candle_rollups.sql`：小时和日预聚合表 `candle_rollup`，并用已有的分钟数据回填。
+- `V1__trade_data.sql`: the minute-candle table `newtable` and the `(symbol, open_time)` unique index that the `ON CONFLICT` idempotent write relies on.
+- `V2__candle_rollups.sql`: the hourly/daily rollup table `candle_rollup`, backfilled from the minute data already stored.
 
-引入 Flyway 之前就已经建好表的数据库（有表、没有 Flyway 历史表）会被记为版本 0；`V1` 全部使用 `IF NOT EXISTS`，在这种数据库上不做任何改动，之后的迁移照常执行。数据库用户需要有建表权限。
+A database that was created before Flyway was introduced (tables exist, no Flyway history table) is baselined at version 0; `V1` uses `IF NOT EXISTS` throughout and changes nothing there, and later migrations run normally. The database user needs permission to create tables.
 
-### 3. 构建并启动
+### 3. Build and start
 
 ```bash
 docker compose config --quiet
@@ -108,22 +107,22 @@ docker compose ps
 docker compose logs -f app
 ```
 
-首次构建需要从 Docker Hub 和 Maven Central 下载依赖。应用还需要能够访问 Binance.US 和 PostgreSQL。默认的 Compose 配置启用 HTTP 服务，不启用交互式 Claude 终端。
+The first build downloads dependencies from Docker Hub and Maven Central. The application also needs access to Binance.US and PostgreSQL. The default Compose configuration runs the HTTP service and does not start the interactive Claude terminal.
 
-### 4. 验证 HTTP API
+### 4. Try the HTTP API
 
-所有时间参数均为 Unix epoch 毫秒。
+All time parameters are Unix epoch milliseconds.
 
-| 方法和路径 | 用途 |
+| Method and path | Purpose |
 | --- | --- |
-| `GET /messages` | 检查应用是否响应 |
-| `POST /api/load/{symbol}/{startTime}/{endTime}` | 拉取指定区间的 1 分钟 K 线并发送到 Kafka；需要 `X-API-Key` 请求头 |
-| `GET /api/aggregates/{period}/{symbol}/{startTime}/{endTime}` | 查询聚合数据；`period` 为 `HOURLY` 或 `DAILY` |
-| `GET /api/admin/dead-letters?limit=50` | 列出死信 topic 中还没处理的记录：失败原因、原始 topic 和 offset、已重放次数、能否重放；需要 `X-API-Key` |
-| `POST /api/admin/dead-letters/replay?limit=100` | 把还没处理的死信重新发回行情 topic；需要 `X-API-Key` |
-| `GET /api/reconciliation/daily/{symbol}/{from}/{to}` | 对账；`from`、`to` 为 `YYYY-MM-DD` 格式的 UTC 日期（含两端），最多 366 天，且必须是已经结束的日期 |
+| `GET /messages` | Check that the application responds |
+| `POST /api/load/{symbol}/{startTime}/{endTime}` | Fetch the one-minute candles in the range and publish them to Kafka; requires `X-API-Key` |
+| `GET /api/aggregates/{period}/{symbol}/{startTime}/{endTime}` | Query aggregates; `period` is `HOURLY` or `DAILY` |
+| `GET /api/admin/dead-letters?limit=50` | List unprocessed records in the dead-letter topic: failure reason, original topic and offset, replay count, whether it can be replayed; requires `X-API-Key` |
+| `POST /api/admin/dead-letters/replay?limit=100` | Send unprocessed dead letters back to the market-data topic; requires `X-API-Key` |
+| `GET /api/reconciliation/daily/{symbol}/{from}/{to}` | Reconciliation; `from` and `to` are inclusive UTC dates in `YYYY-MM-DD`, at most 366 days, and must be completed days |
 
-PowerShell 示例：
+PowerShell example:
 
 ```powershell
 Invoke-RestMethod "http://localhost:8080/messages"
@@ -136,52 +135,52 @@ Invoke-RestMethod -Method Post -Headers $headers "http://localhost:8080/api/load
 Invoke-RestMethod "http://localhost:8080/api/aggregates/HOURLY/BTCUSDT/$start/$end"
 ```
 
-拉取接口的行为：
+How the load endpoint behaves:
 
-- 拉取会写数据并调用交易所，所以是 `POST`，并且必须带正确的 `X-API-Key`，否则返回 `401`。查询类接口（聚合、对账、健康检查）不需要密钥。
-- `symbol` 只允许 2 到 20 位字母或数字；时间区间必须满足 `startTime < endTime`，且不超过 `BINANCE_MAX_RANGE`（默认 366 天）。不满足时返回 `400`。
-- 对 Binance.US 的请求最多并发 `BINANCE_MAX_CONCURRENT_REQUESTS` 个；遇到 `429`、`5xx` 或网络错误会退避重试（优先使用 `Retry-After`）。
-- 返回的数量是 Kafka 已确认接收的记录数，不含未收盘而被跳过的 K 线。只要有一个批次最终失败，就返回 `502`，并说明已发送多少条、多少个批次失败；已发送的记录可以通过重新请求同一区间安全补齐。
+- Loading writes data and calls the exchange, so it is a `POST` and must carry the correct `X-API-Key`, otherwise it returns `401`. Read-only endpoints (aggregates, reconciliation, health) need no key.
+- `symbol` must be 2 to 20 letters or digits; the range must satisfy `startTime < endTime` and may not exceed `BINANCE_MAX_RANGE` (default 366 days). Anything else returns `400`.
+- At most `BINANCE_MAX_CONCURRENT_REQUESTS` requests to Binance.US run at once; `429`, `5xx` and network errors are retried with backoff (`Retry-After` is honoured when present).
+- The returned count is the number of records Kafka acknowledged, excluding candles skipped because they had not closed. If any batch ultimately fails, the endpoint returns `502` and reports how many records were sent and how many batches failed; the records already sent can be completed safely by requesting the same range again.
 
-聚合的开、高、低、收只取有成交的分钟：交易所会用上一分钟的收盘价填充没有成交的分钟，如果当天第一分钟没有成交，直接取它会把前一天的价格带进今天的开盘价。这个问题是用对账接口核对 2024 全年真实数据时发现的（修复前 366 天中有 22 天开盘价不一致，修复后 366 天全部一致）。
+The open, high, low and close of an aggregate come only from minutes that traded: the exchange fills a minute without trades with the previous minute's close, so taking the first minute of a day blindly carries yesterday's price into today's open. This was found by reconciling the real 2024 data with the reconciliation endpoint (22 of 366 days had a mismatched open before the fix; all 366 matched after it).
 
-批量写入前后的吞吐（本机 Docker 上的 PostgreSQL 16 和 Kafka 3.9.1，从同一个 topic 消费 2024 全年 527,040 条消息，只计写库时间）：
+Throughput before and after batch writes (PostgreSQL 16 and Kafka 3.9.1 in local Docker, consuming all 527,040 messages of 2024 from the same topic, counting only the write time):
 
-| 版本 | 耗时 | 吞吐 |
+| Version | Time | Throughput |
 | --- | --- | --- |
-| 逐条写入 | 162.0 秒 | 约 3,250 行/秒 |
-| 每次 poll 一条多行 upsert | 约 10.5 秒（两次 10.7 / 10.4） | 约 50,000 行/秒 |
+| One row per write | 162.0 s | about 3,250 rows/s |
+| One multi-row upsert per poll | about 10.5 s (two runs: 10.7 / 10.4) | about 50,000 rows/s |
 
-加上预聚合后，consumer 在同一个事务里还要更新受影响的小时和日预聚合，吞吐下降约 25%（同样条件下两次 13.6 / 14.3 秒，未加预聚合的版本两次 10.5 / 11.5 秒）。换来的是查询（本机，Redis 缓存未命中，各 15 次取中位数，两个版本返回的结果完全相同）：
+With rollups, the consumer also refreshes the affected hourly and daily buckets in the same transaction, which costs about 25% of throughput (13.6 / 14.3 s in two runs under the same conditions, against 10.5 / 11.5 s without rollups). In exchange, queries become much cheaper (local, Redis cache miss, median of 15 runs, both versions returning identical results):
 
-| 查询 2024 全年 | 从分钟数据现算 | 读预聚合 |
+| Query over all of 2024 | Computed from minutes | Read from rollups |
 | --- | --- | --- |
-| 366 个日 K 线 | 约 487 ms | 约 6.7 ms |
-| 8,784 个小时 K 线 | 约 459 ms | 约 21 ms |
+| 366 daily candles | about 487 ms | about 6.7 ms |
+| 8,784 hourly candles | about 459 ms | about 21 ms |
 
-改成批量写入后，拉取全年数据时 consumer 已能跟上 Binance.US 的拉取速度：接口返回时（约 27 秒）数据已全部落库，之前要约 190 秒。数据库在远端（如 RDS）时每条语句多一次网络往返，实际数字会不同。
+With batch writes the consumer keeps up with the Binance.US fetch when loading a whole year: by the time the endpoint returns (about 27 s) everything is in the database, where it used to take about 190 s. With a remote database such as RDS every statement pays a network round trip, so the numbers differ.
 
-对账接口同时检查两层：
+The reconciliation endpoint checks two layers:
 
-- 分钟数据按 UTC 日聚合后，和交易所自己的日线逐字段比较。只比较存满 1,440 分钟的日子；分钟数不足的记为 `INCOMPLETE`，不参与比较。数值按值比较（`1.5` 等于 `1.50000000`），成交笔数必须完全相等。不一致记为 `MISMATCH`。
-- 查询实际使用的日预聚合，和同一天的分钟数据聚合结果比较。不一致记为 `ROLLUP_MISMATCH`，说明预聚合和分钟数据脱节了。
+- The stored minutes, aggregated per UTC day, are compared field by field with the exchange's own daily candle. Only days with all 1,440 minutes are compared; days with fewer are reported as `INCOMPLETE` and skipped. Prices and volumes are compared by value (`1.5` equals `1.50000000`); trade counts must be identical. A difference is reported as `MISMATCH`.
+- The daily rollup that queries actually use is compared with the aggregate of the same day's minute rows. A difference is reported as `ROLLUP_MISMATCH`, meaning the rollups have drifted from the minute data.
 
-返回的 `discrepancies` 只列出有问题的日子及其不一致的字段（`stored` 是库里的值，`expected` 是交易所的值或由分钟数据算出的值）。例如核对 2024 全年：
+The returned `discrepancies` list only the problematic days and their differing fields (`stored` is the database value, `expected` the exchange's value or the value computed from the minutes). For example, to check all of 2024:
 
 ```powershell
 Invoke-RestMethod "http://localhost:8080/api/reconciliation/daily/BTCUSDT/2024-01-01/2024-12-31"
 ```
 
-死信重放：
+Dead-letter replay:
 
-- 用一个单独的 consumer group（`<consumer group>-dlt-replay`）记录处理到哪里：之前的记录都已经重放或跳过，`GET` 只列出之后的。
-- 能解析成完整 K 线的记录会带着原来的 key 发回行情 topic，所以和同一个 symbol 的其他消息在同一个分区；等 Kafka 全部确认后才提交进度，发送失败就什么都不提交，下次重新处理。
-- 每次重放把 `x-replay-count` 加一。再次失败的记录会带着这个计数回到死信 topic，达到 `KAFKA_DLT_MAX_REPLAYS`（默认 3）后不再重放，避免一条坏消息无限循环。
-- 无法解析的记录（例如反序列化失败的原始字节）和超过次数的记录会被跳过：在返回结果里列出原因，之后不再出现在 `GET` 中，但仍保留在死信 topic 里，直到 Kafka 的保留期结束。
+- Progress is tracked by a dedicated consumer group (`<consumer group>-dlt-replay`): everything before its position has already been replayed or skipped, so `GET` lists only what comes after.
+- A record that parses into a complete candle is sent back to the market-data topic with its original key, so it lands in the same partition as the other messages for that symbol. Progress is committed only after Kafka acknowledges every send; if a send fails, nothing is committed and the batch is processed again next time.
+- Every replay increments `x-replay-count`. A record that fails again returns to the dead-letter topic with that count; once it reaches `KAFKA_DLT_MAX_REPLAYS` (default 3) it is no longer replayed, so one bad message cannot loop forever.
+- Records that cannot be parsed (for example, the raw bytes of a deserialization failure) and records over the replay limit are skipped: the reason is reported in the response and they no longer appear in `GET`, but they stay in the dead-letter topic until Kafka's retention expires.
 
-聚合接口每个桶的 `candleCount` 是实际的分钟数，`expectedCandleCount` 是该桶在请求区间内应有的分钟数，`complete` 只有在两者相等且桶已经结束时为 `true`。完全没有数据的桶不会出现在结果中。
+For every bucket of an aggregate, `candleCount` is the number of minutes actually stored, `expectedCandleCount` the number of minutes the bucket should have within the requested range, and `complete` is `true` only when the two are equal and the bucket has ended. Buckets with no data at all are not returned.
 
-拉取接口返回的数量表示已发送到 Kafka 的记录数；最终是否落库应通过应用日志或 PostgreSQL 查询确认：
+The count returned by the load endpoint is the number of records sent to Kafka; whether they reached the database should be confirmed in the application logs or in PostgreSQL:
 
 ```sql
 SELECT *
@@ -191,21 +190,21 @@ ORDER BY open_time DESC
 LIMIT 10;
 ```
 
-### 5. 停止服务
+### 5. Stop
 
 ```bash
 docker compose down
 ```
 
-此 Compose 配置面向本地开发和演示：Redis 只用作可重建缓存；Kafka 是单节点、无认证且没有持久化 volume，删除容器后消息和 offset 可能丢失。业务数据保存在外部 PostgreSQL 中。
+This Compose setup is meant for local development and demos: Redis is only a rebuildable cache; Kafka is a single node without authentication or a persistent volume, so messages and offsets may be lost when the container is removed. Business data lives in the external PostgreSQL.
 
-## 使用 Claude 行情终端
+## Using the Claude market terminal
 
-终端模式目前只支持 `BTCUSDT`，并且每次问题必须对应一个已经结束的 UTC 日期。相对日期（如“昨天”“前天”）也按 UTC 解释，问题长度不能超过 2000 个字符。
+The terminal currently supports `BTCUSDT` only, and every question must refer to one completed UTC day. Relative dates such as "yesterday" are also interpreted in UTC, and a question may not exceed 2,000 characters.
 
-### 1. 添加可选配置
+### 1. Add the optional settings
 
-在本机 `.env` 中添加：
+Add to the local `.env`:
 
 ```dotenv
 ANTHROPIC_API_KEY=YOUR_ANTHROPIC_API_KEY
@@ -214,108 +213,107 @@ TERMINAL_CHAT_ENABLED=true
 BINANCE_API_BASE_URL=https://api.binance.us
 ```
 
-除 `ANTHROPIC_API_KEY` 和 `TERMINAL_CHAT_ENABLED=true` 外，其余配置已有上述默认值。默认使用 Claude Sonnet（模型名见 `application.properties` 的 `claude.model`），可以用 `CLAUDE_MODEL` 覆盖。终端问题会发送给 Anthropic 的 API，请不要在问题中输入密码、密钥或其他敏感信息。
+Everything except `ANTHROPIC_API_KEY` and `TERMINAL_CHAT_ENABLED=true` already has the defaults shown. The default model is Claude Sonnet (see `claude.model` in `application.properties`); override it with `CLAUDE_MODEL`. Questions are sent to Anthropic's API, so do not type passwords, keys or other sensitive information into them.
 
-### 2. 启动交互式应用
+### 2. Start the interactive application
 
-常规的 `docker compose up -d` 不会把终端配置传入应用容器，也不适合交互式输入。使用下面的一次性容器命令；它会构建应用、启动依赖、读取 `.env`，并在退出后删除应用容器：
+A plain `docker compose up -d` neither passes the terminal settings to the container nor suits interactive input. Use the one-off container command below; it builds the application, starts the dependencies, reads `.env`, and removes the application container on exit:
 
 ```bash
 docker compose run --rm --build --env-from-file .env -e TERMINAL_CHAT_ENABLED=true app
 ```
 
-如果希望直接在本机运行，也可以先启动所需依赖，再从项目根目录执行 `./mvnw spring-boot:run`；Windows 使用 `.\mvnw.cmd spring-boot:run`，并确保当前进程可以读取 `.env` 中的配置。
+To run on the host instead, start the dependencies first and run `./mvnw spring-boot:run` from the project root (`.\mvnw.cmd spring-boot:run` on Windows), making sure the process can read the settings in `.env`.
 
-启动后可输入：
+Once it is running, try:
 
 ```text
-查询 2024 年 1 月 2 日比特币的开高低收，并分析波动
+Show me Bitcoin's open, high, low and close for January 2, 2024 and comment on the volatility
 ```
 
-输入 `exit`、`quit` 或 `退出` 可退出问答模式；Spring Boot 仍会继续运行，按 `Ctrl+C` 停止应用。
+Type `exit` or `quit` to leave the question loop; Spring Boot keeps running until you press `Ctrl+C`.
 
-查询时，应用只有在数据库恰好包含该 UTC 日完整的 1440 条分钟数据时才使用数据库日聚合，否则回退到 Binance.US 日线接口；回退结果仅用于本次查询，不会自动写回数据库。Claude 会收到原始问题、已验证的行情，以及程序算好的振幅、涨跌幅和它们占开盘价的百分比，并只根据这些生成分析；结果仅供参考，不构成投资建议。分析返回后，`AnalysisGuard` 会做确定性校验：文中每个价格和百分比都必须是程序提供的值（允许四舍五入），必须写明日期、UTC 和数据来源，必须有“不是投资建议”的提醒，汉字不超过 300 个。校验不通过时终端仍显示分析，但会列出问题并提示只参考行情数据。
+For each question, the application uses the database's daily aggregate only when the database holds exactly the 1,440 minute rows of that UTC day; otherwise it falls back to the Binance.US daily endpoint. The fallback result is used for that question only and is never written back to the database. Claude receives the original question, the verified candle, and the range, the change and their percentages of the open as computed by the application, and writes its analysis from those alone; the result is for reference only and is not investment advice. After the answer comes back, `AnalysisGuard` runs deterministic checks: every price and percentage in the text must be a value the application supplied (rounding allowed), the date, UTC and the data source must be stated, the "not investment advice" reminder must be present, and the text must stay under 200 words. When a check fails, the terminal still prints the analysis but lists the problems and tells the user to rely on the market data only.
 
-问题解析用的是 Anthropic Messages API 的结构化输出（`output_config.format`，类型 `json_schema`）：应用给出 `symbol`、`date`、`error` 三个字段的 JSON Schema，模型的回答保证符合这个结构，不需要从自由文本里截取；代码随后再独立校验标的白名单和日期，模型把“今天”当成有效日期时也会被拒绝。分析那一步是普通的文本回复。
+Question parsing uses structured output on the Anthropic Messages API (`output_config.format` of type `json_schema`): the application supplies a JSON schema with the fields `symbol`, `date` and `error`, and the model's answer is guaranteed to match it, so nothing has to be cut out of free text. The code then validates the symbol allow-list and the date independently; a question about "today" is rejected even if the model treats it as a valid date. The analysis step is an ordinary text reply.
 
-## 助手的评估（发布门槛）
+## Evaluating the assistant (release gate)
 
-`ClaudeLiveEvalTest` 用真实 API 跑一组固定题，作为改 prompt、换模型或升级后的发布门槛。它只在设置了 `ANTHROPIC_API_KEY` 时运行，CI 里没有这个变量，所以不会跑；一次大约 37 次 Sonnet 调用。
+`ClaudeLiveEvalTest` runs a fixed question set against the real API and acts as the release gate after a prompt change, a model change or an upgrade. It runs only when `ANTHROPIC_API_KEY` is set; CI has no such variable, so it never runs there. One run makes about 37 Sonnet calls.
 
 ```bash
 ANTHROPIC_API_KEY=YOUR_ANTHROPIC_API_KEY ./mvnw test -Dtest=ClaudeLiveEvalTest -Dsurefire.failIfNoSpecifiedTests=false
 ```
 
-- **问题解析**（`src/test/resources/eval/intent-questions.json`，27 题）：中英文的明确日期、`2024/01/02` 和 `2024.1.2` 这类写法、昨天/前天/去年这类相对日期、没写标的时默认 BTCUSDT；以及必须拒绝的情况：今天、未来、日期范围、没有日期、以太坊等其他标的、无效日期，和两条试图改写规则的注入式提问。每题要么得到期望的 `symbol` 和日期，要么在期望拒绝时被拒绝。
-- **分析**（`src/test/resources/eval/analysis-days.json`，5 个真实交易日 × 2 种问法）：每条回复都要通过 `AnalysisGuard` 的全部确定性检查。
-- 通过率低于阈值（默认都是 90%，可用 `-Deval.intent.threshold` 和 `-Deval.analysis.threshold` 调整）时测试失败。逐题结果写到 `target/eval-report.md`，分析原文折叠在报告里。
+- **Question parsing** (`src/test/resources/eval/intent-questions.json`, 27 questions): explicit dates in English and Chinese, spellings such as `2024/01/02` and `2024.1.2`, relative dates such as yesterday, the day before yesterday and last year, and the BTCUSDT default when no asset is named; plus the cases that must be refused: today, the future, date ranges, no date, other assets such as Ethereum, invalid dates, and two prompt injections that try to rewrite the rules. Every question must either yield the expected `symbol` and date or be refused when refusal is expected.
+- **Analysis** (`src/test/resources/eval/analysis-days.json`, 5 real trading days × 2 phrasings): every reply must pass all of `AnalysisGuard`'s deterministic checks.
+- The test fails when a pass rate falls below its threshold (90% for both by default; adjustable with `-Deval.intent.threshold` and `-Deval.analysis.threshold`). Per-question results go to `target/eval-report.md`, with the analysis texts folded into the report.
 
-## 配置参考
+## Configuration reference
 
-| 变量 | 必需 | 默认值 | 说明 |
+| Variable | Required | Default | Description |
 | --- | --- | --- | --- |
-| `SPRING_DATASOURCE_URL` | 是 | 无 | PostgreSQL JDBC URL |
-| `SPRING_DATASOURCE_USERNAME` | 是 | 无 | PostgreSQL 用户名 |
-| `SPRING_DATASOURCE_PASSWORD` | 是 | 无 | PostgreSQL 密码 |
-| `KAFKA_BOOTSTRAP_SERVERS` | 否 | `localhost:9092` | Kafka broker；Compose 内使用 `kafka:29092` |
-| `KAFKA_TRADE_DATA_TOPIC` | 否 | `trade-data` | 行情 topic |
-| `KAFKA_CONSUMER_GROUP_ID` | 否 | `demo-trade-data-consumer` | Kafka consumer group |
-| `KAFKA_TRADE_DATA_DLT_TOPIC` | 否 | `<行情 topic>.DLT` | 死信 topic |
-| `KAFKA_MAX_POLL_RECORDS` | 否 | `500` | 每次 poll 的最大条数，也是一条多行 upsert 的最大行数 |
-| `KAFKA_RETRY_MAX_RETRIES` | 否 | `3` | 写入失败后的重试次数，之后进入死信 topic |
-| `KAFKA_RETRY_INITIAL_INTERVAL` | 否 | `PT1S` | 第一次重试的等待时间，之后每次翻倍 |
-| `KAFKA_DLT_MAX_REPLAYS` | 否 | `3` | 一条死信最多被重放几次 |
-| `REDIS_HOST` | 否 | `localhost` | Redis 主机；Compose 内使用 `redis` |
-| `REDIS_PORT` | 否 | `6379` | Redis 端口 |
-| `BINANCE_API_BASE_URL` | 否 | `https://api.binance.us` | 拉取分钟 K 线和日线回退查询使用的 Binance.US API 根地址 |
-| `BINANCE_MAX_RANGE` | 否 | `P366D` | 单次拉取允许的最大时间区间 |
-| `BINANCE_MAX_CONCURRENT_REQUESTS` | 否 | `4` | 对 Binance.US 的最大并发请求数 |
-| `BINANCE_MAX_ATTEMPTS` | 否 | `3` | 每个批次的最大请求次数（含第一次） |
-| `BINANCE_RETRY_BACKOFF` | 否 | `PT1S` | 重试的初始等待时间，之后每次翻倍 |
-| `AGGREGATE_CACHE_CLOSED_TTL` | 否 | `PT1H` | 区间已经结束的聚合结果缓存时间 |
-| `AGGREGATE_CACHE_OPEN_TTL` | 否 | `PT1M` | 区间延伸到当前时间之后的聚合结果缓存时间 |
-| `APP_API_KEY` | 调用拉取和管理接口时 | 空 | `X-API-Key` 请求头要带的密钥；为空时这些接口返回 `503` |
-| `ANTHROPIC_API_KEY` | 仅终端 | 空 | Anthropic API Key |
-| `CLAUDE_API_URL` | 否 | `https://api.anthropic.com/v1/messages` | Anthropic Messages API 地址 |
-| `CLAUDE_API_VERSION` | 否 | `2023-06-01` | 请求头 `anthropic-version` 的值 |
-| `CLAUDE_MODEL` | 否 | Claude Sonnet（见 `application.properties`） | Claude 模型名 |
-| `TERMINAL_CHAT_ENABLED` | 否 | `false` | 是否启动交互式行情终端 |
+| `SPRING_DATASOURCE_URL` | yes | none | PostgreSQL JDBC URL |
+| `SPRING_DATASOURCE_USERNAME` | yes | none | PostgreSQL user |
+| `SPRING_DATASOURCE_PASSWORD` | yes | none | PostgreSQL password |
+| `KAFKA_BOOTSTRAP_SERVERS` | no | `localhost:9092` | Kafka broker; `kafka:29092` inside Compose |
+| `KAFKA_TRADE_DATA_TOPIC` | no | `trade-data` | Market-data topic |
+| `KAFKA_CONSUMER_GROUP_ID` | no | `demo-trade-data-consumer` | Kafka consumer group |
+| `KAFKA_TRADE_DATA_DLT_TOPIC` | no | `<market-data topic>.DLT` | Dead-letter topic |
+| `KAFKA_MAX_POLL_RECORDS` | no | `500` | Maximum records per poll, and therefore rows per multi-row upsert |
+| `KAFKA_RETRY_MAX_RETRIES` | no | `3` | Retries after a failed write before the record goes to the dead-letter topic |
+| `KAFKA_RETRY_INITIAL_INTERVAL` | no | `PT1S` | Wait before the first retry; doubles each time |
+| `KAFKA_DLT_MAX_REPLAYS` | no | `3` | How many times one dead letter may be replayed |
+| `REDIS_HOST` | no | `localhost` | Redis host; `redis` inside Compose |
+| `REDIS_PORT` | no | `6379` | Redis port |
+| `BINANCE_API_BASE_URL` | no | `https://api.binance.us` | Binance.US API root used for minute fetches and the daily fallback |
+| `BINANCE_MAX_RANGE` | no | `P366D` | Maximum range of one load request |
+| `BINANCE_MAX_CONCURRENT_REQUESTS` | no | `4` | Maximum concurrent requests to Binance.US |
+| `BINANCE_MAX_ATTEMPTS` | no | `3` | Maximum attempts per batch, including the first |
+| `BINANCE_RETRY_BACKOFF` | no | `PT1S` | Initial retry wait; doubles each time |
+| `AGGREGATE_CACHE_CLOSED_TTL` | no | `PT1H` | Cache TTL for aggregates whose range has ended |
+| `AGGREGATE_CACHE_OPEN_TTL` | no | `PT1M` | Cache TTL for aggregates whose range extends past now |
+| `APP_API_KEY` | for load and admin calls | empty | Value of the `X-API-Key` header; when empty those endpoints return `503` |
+| `ANTHROPIC_API_KEY` | terminal only | empty | Anthropic API key |
+| `CLAUDE_API_URL` | no | `https://api.anthropic.com/v1/messages` | Anthropic Messages API endpoint |
+| `CLAUDE_API_VERSION` | no | `2023-06-01` | Value of the `anthropic-version` header |
+| `CLAUDE_MODEL` | no | Claude Sonnet (see `application.properties`) | Claude model name |
+| `TERMINAL_CHAT_ENABLED` | no | `false` | Whether to start the interactive terminal |
 
-## 本地测试
+## Running the tests
 
-Windows：
+Windows:
 
 ```powershell
 .\mvnw.cmd test
 ```
 
-macOS/Linux：
+macOS/Linux:
 
 ```bash
 ./mvnw test
 ```
 
-测试分两类：
+There are three kinds of tests:
 
-- 单元测试：Binance 响应映射、按交易所时钟过滤未收盘 K 线、重试与输入校验、Kafka 发送失败、对账的分类与校验、数据加载接口、Claude 请求/响应（结构化输出的请求体、请求头、回复不是 JSON 时报 502、模型接受“今天”时代码仍拒绝）、分析文本的确定性校验（指标计算、只能引用程序给出的数字、缺少日期/时区/来源/免责声明、超长）和数据库完整性条件。
-- 集成测试（`PipelineIntegrationTest`）：用 Testcontainers 启动真实的 Kafka、PostgreSQL 和 Redis，数据库结构由 Flyway 迁移创建，覆盖预聚合在修正和乱序投递后仍与分钟数据一致、不对齐的查询区间只统计区间内的分钟、重复投递幂等、修正 K 线覆盖旧值、乱序投递下的小时聚合、桶完整性、缓存 TTL、新数据写入后缓存失效、畸形消息进入死信 topic 且不阻塞后续消息、被数据库拒绝的一行进入死信 topic 而同批其他行照常写入、同一批里的修正版覆盖原版，对账能同时发现被故意改坏的一根分钟 K 线和因此脱节的预聚合，以及死信的查看和重放（可重放的写入成功，无法解析的和超过次数的被跳过，处理过的不再出现）。
+- Unit tests: Binance response mapping, filtering of unclosed candles by the exchange clock, retries and input validation, Kafka send failures, reconciliation classification and validation, the load endpoint, the Claude request/response handling (structured-output request body, headers, `502` when the reply is not JSON, code-side rejection of "today" even when the model accepts it), the deterministic analysis checks (metric computation, only supplied figures may be cited, missing date/timezone/source/disclaimer, over-long text) and the database completeness condition.
+- Integration tests (`PipelineIntegrationTest`): Testcontainers start real Kafka, PostgreSQL and Redis, Flyway creates the schema, and the tests cover rollups staying consistent with the minute data after corrections and out-of-order delivery, unaligned query ranges counting only the minutes inside the range, idempotent redelivery, corrected candles overwriting old values, hourly aggregation under out-of-order delivery, bucket completeness, cache TTLs, cache invalidation on new writes, malformed messages going to the dead-letter topic without blocking later messages, a row rejected by the database going to the dead-letter topic while the rest of its batch is written, a correction in the same batch overwriting the original, reconciliation catching both a deliberately corrupted minute candle and the rollup that drifted because of it, and dead-letter listing and replay (replayable records are written, unparseable and over-limit records are skipped, processed records no longer appear).
+- Release gate (`ClaudeLiveEvalTest`): calls the real API, needs `ANTHROPIC_API_KEY`, and is skipped without it; see "Evaluating the assistant".
 
-- 发布门槛（`ClaudeLiveEvalTest`）：调用真实 API，需要 `ANTHROPIC_API_KEY`，没有时自动跳过，见“助手的评估”。
+The integration tests need Docker on the machine; without Docker they are skipped rather than failed. The interactive terminal loop and the full Claude fallback path are not yet covered.
 
-集成测试需要本机运行 Docker；没有 Docker 时会被跳过而不是失败。尚未覆盖交互式终端循环和完整的 Claude 回退链路。
+Every push and pull request runs the whole suite through GitHub Actions (`.github/workflows/ci.yml`).
 
-每次 push 和 pull request 都会通过 GitHub Actions（`.github/workflows/ci.yml`）运行全部测试。
+## Continuous delivery and deployment
 
-## 持续交付与部署
+On every push, GitHub Actions (`.github/workflows/ci.yml`):
 
-GitHub Actions（`.github/workflows/ci.yml`）在每次 push 时：
+1. runs all tests;
+2. once they pass, builds the Docker image and pushes it to `ghcr.io/chenziliang1/market-data-pipeline`, tagged `sha-<commit>` and with the branch name;
+3. optionally, through AWS Systems Manager, switches the EC2 host to that commit's image blue-green style: the new version starts in the idle slot, nginx switches over only after `/actuator/health` passes (PostgreSQL and Redis both reachable), and the old version is then stopped gracefully. If the new version never becomes healthy, the job fails and the old version keeps serving. Measured on EC2, a health probe every 0.2 s saw no failed request during a deploy (before blue-green, every deploy meant about 14 s of downtime).
 
-1. 运行全部测试；
-2. 测试通过后构建 Docker 镜像，推送到 `ghcr.io/chenziliang1/market-data-pipeline`，标签为 `sha-<commit>` 和分支名；
-3. 可选：通过 AWS Systems Manager 让 EC2 以蓝绿方式切换到这个 commit 的镜像：新版本在空闲槽位启动，`/actuator/health` 通过（PostgreSQL 和 Redis 都可达）后 nginx 才切过去，再优雅停止旧版本。新版本起不来时任务失败，旧版本继续服务。在 EC2 上实测，部署期间每 0.2 秒一次的健康检查请求没有一次失败（改成蓝绿之前，每次部署约有 14 秒不可用）。
+Step 3 is off by default and needs a one-time AWS setup (OIDC role, Docker and database settings on EC2); see [deploy/README.md](deploy/README.md). Deployment uses no SSH, and GitHub stores neither AWS keys nor the database password.
 
-第 3 步默认关闭，需要一次性配置 AWS（OIDC 角色、EC2 上的 Docker 和数据库配置），步骤见 [deploy/README.md](deploy/README.md)。部署不使用 SSH，GitHub 上不保存 AWS 密钥或数据库密码。
+## About Jenkins
 
-## Jenkins 说明
-
-这个仓库目前没有 Jenkinsfile。此前完成的 Jenkins 练习是独立的 Maven/Hello World 部署实验，目标是本地私有网络中的 CentOS 虚拟机，并不是 Tradedate 在 AWS 上的生产部署链路。当前仓库可复现的部署方式以本页的 Docker Compose 流程为准。
+This repository has no Jenkinsfile. The Jenkins work done earlier was a separate Maven/Hello World deployment exercise targeting a CentOS virtual machine on a private network, not Tradedate's production path on AWS. The reproducible deployment of this repository is the Docker Compose flow described on this page.

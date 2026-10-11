@@ -74,7 +74,7 @@ class ClaudeServicesTest {
                         MODEL);
 
         ParsedMarketQuery result = service.extract(
-                "查询 2024 年 1 月 2 日的比特币行情");
+                "Show me Bitcoin on January 2, 2024");
 
         assertEquals("BTCUSDT", result.symbol());
         assertEquals(LocalDate.of(2024, 1, 2), result.date());
@@ -104,7 +104,7 @@ class ClaudeServicesTest {
 
         ResponseStatusException exception = assertThrows(
                 ResponseStatusException.class,
-                () -> service.extract("查询 2024 年 1 月 2 日的比特币行情"));
+                () -> service.extract("Show me Bitcoin on January 2, 2024"));
 
         assertEquals(HttpStatus.BAD_GATEWAY, exception.getStatusCode());
         server.verify();
@@ -139,7 +139,7 @@ class ClaudeServicesTest {
 
         ResponseStatusException exception = assertThrows(
                 ResponseStatusException.class,
-                () -> service.extract("查询今天的比特币价格"));
+                () -> service.extract("What is Bitcoin's price today?"));
 
         assertEquals(HttpStatus.BAD_REQUEST, exception.getStatusCode());
         server.verify();
@@ -162,7 +162,7 @@ class ClaudeServicesTest {
                         .value(org.hamcrest.Matchers.containsString("rangePct: 20.00%")))
                 .andExpect(jsonPath("$.output_config").doesNotExist())
                 .andRespond(withSuccess(
-                        textResponse("行情分析结果"),
+                        textResponse("analysis text"),
                         MediaType.APPLICATION_JSON));
 
         ClaudeAnalysisService service =
@@ -174,9 +174,9 @@ class ClaudeServicesTest {
 
         AnalysisResult result = service.analyze(
                 sampleMarketData(),
-                "请分析当天行情");
+                "Describe the day");
 
-        assertEquals("行情分析结果", result.analysis());
+        assertEquals("analysis text", result.analysis());
         assertFalse(result.passed(), "a bare sentence must fail the deterministic checks");
         server.verify();
     }

@@ -63,16 +63,16 @@ public class MarketTerminalRunner
                 new PrintWriter(System.out, true);
 
         output.println();
-        output.println("Claude 比特币行情终端已启动。");
-        output.println("每个问题请包含一个日期。");
-        output.println("昨天、前天等相对日期按照 UTC 解释。");
+        output.println("Claude Bitcoin market terminal is ready.");
+        output.println("Every question must name one date.");
+        output.println("Relative dates such as yesterday are interpreted in UTC.");
         output.println(
-                "示例：查询2024年1月2日比特币的开高低收，并分析波动");
+                "Example: Show me Bitcoin's open, high, low and close for January 2, 2024 and comment on the volatility");
         output.println(
-                "输入 exit、quit 或 退出，可退出问答模式。");
+                "Type exit or quit to leave the question loop.");
 
         while (!Thread.currentThread().isInterrupted()) {
-            output.print("\n你> ");
+            output.print("\nyou> ");
             output.flush();
 
             String question = input.readLine();
@@ -89,7 +89,7 @@ public class MarketTerminalRunner
 
             if (isExitCommand(question)) {
                 output.println(
-                        "已退出问答模式；按 Ctrl+C 停止 Spring Boot。");
+                        "Left the question loop; press Ctrl+C to stop Spring Boot.");
                 return;
             }
 
@@ -99,7 +99,7 @@ public class MarketTerminalRunner
                                 question);
 
                 output.printf(
-                        "识别结果：%s，%s（UTC）%n",
+                        "Understood: %s, %s (UTC)%n",
                         parsed.symbol(),
                         parsed.date());
 
@@ -116,25 +116,25 @@ public class MarketTerminalRunner
                                     data,
                                     question);
 
-                    output.println("\nClaude 分析：");
+                    output.println("\nClaude analysis:");
                     output.println(result.analysis());
 
                     if (!result.passed()) {
                         output.println(
-                                "\n程序校验未通过，请只参考上面的行情数据：");
+                                "\nThe analysis failed the application's checks; rely on the market data above only:");
                         result.problems().forEach(
                                 problem -> output.println("- " + problem));
                     }
 
                 } catch (RuntimeException exception) {
                     output.println(
-                            "\n行情已查到，但 Claude 分析失败："
+                            "\nMarket data retrieved, but the Claude analysis failed: "
                                     + userMessage(exception));
                 }
 
             } catch (RuntimeException exception) {
                 output.println(
-                        "处理失败："
+                        "Could not answer: "
                                 + userMessage(exception));
             }
         }
@@ -144,48 +144,47 @@ public class MarketTerminalRunner
             PrintWriter output,
             DailyOhlcvResponse data) {
 
-        output.println("\n已验证日线行情：");
+        output.println("\nVerified daily candle:");
 
         output.printf(
-                "日期：%s (%s)%n",
+                "Date: %s (%s)%n",
                 data.date(),
                 data.timezone());
 
         output.printf(
-                "开盘：%s USDT%n",
+                "Open: %s USDT%n",
                 data.open().toPlainString());
 
         output.printf(
-                "最高：%s USDT%n",
+                "High: %s USDT%n",
                 data.high().toPlainString());
 
         output.printf(
-                "最低：%s USDT%n",
+                "Low: %s USDT%n",
                 data.low().toPlainString());
 
         output.printf(
-                "收盘：%s USDT%n",
+                "Close: %s USDT%n",
                 data.close().toPlainString());
 
         output.printf(
-                "成交量：%s BTC%n",
+                "Volume: %s BTC%n",
                 data.volume().toPlainString());
 
         output.printf(
-                "成交笔数：%s%n",
+                "Trades: %s%n",
                 data.tradeCount() == null
                         ? "N/A"
                         : data.tradeCount().toString());
 
         output.printf(
-                "数据源：%s%n",
+                "Source: %s%n",
                 data.source());
     }
 
     private boolean isExitCommand(String value) {
         return "exit".equalsIgnoreCase(value)
-                || "quit".equalsIgnoreCase(value)
-                || "退出".equals(value);
+                || "quit".equalsIgnoreCase(value);
     }
 
     private String userMessage(
@@ -201,7 +200,7 @@ public class MarketTerminalRunner
         String message = exception.getMessage();
 
         return message == null || message.isBlank()
-                ? "未知错误"
+                ? "unknown error"
                 : message;
     }
 }
