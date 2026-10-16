@@ -1,6 +1,6 @@
 # Market Data Pipeline
 
-A Bitcoin market-data service built on Java 17 and Spring Boot 3.5.11. It fetches one-minute OHLCV candles from Binance.US, writes them to PostgreSQL through a Kafka producer/consumer pipeline, keeps hourly and daily rollups in step with the minute data, reconciles the stored data against the exchange, and serves aggregates through a Redis cache. Every push is tested on GitHub Actions and deployed blue-green to an EC2 host behind nginx.
+A Bitcoin market-data service built on Java 17 and Spring Boot 3.5.11. It fetches one-minute OHLCV candles from Binance.US, writes them to PostgreSQL through a Kafka producer/consumer pipeline, keeps hourly and daily rollups in step with the minute data, reconciles the stored data against the exchange, and serves aggregates through a Redis cache. Every push is tested on GitHub Actions; when deployment is enabled, passing builds are deployed blue-green to an EC2 host behind nginx.
 
 The project also ships an optional Claude command-line assistant: it extracts BTCUSDT and a date from a question written in English or Chinese, prefers the complete daily data in the database, falls back to Binance.US when the day is incomplete, and has Claude write a short analysis from the verified figures only.
 
@@ -16,7 +16,7 @@ All figures below were measured on this code; the conditions are stated next to 
 | One multi-row upsert per poll | about 10.5 s (two runs: 10.7 / 10.4) | about 50,000 rows/s |
 | Multi-row upsert plus hourly/daily rollups in the same transaction | 13.6 / 14.3 s (two runs) | about 37,000 rows/s |
 
-Refreshing the rollups costs about 25% of write throughput. In exchange, a year of candles is read from 365 rollup rows instead of being aggregated from half a million minute rows:
+Refreshing the rollups costs about 25% of write throughput. In exchange, a year of daily candles is read from 365 or 366 rollup rows instead of being aggregated from half a million minute rows:
 
 | Full-year daily candles, Redis cache miss | Computed from minutes | Read from rollups |
 | --- | --- | --- |
@@ -50,7 +50,7 @@ flowchart LR
     PG --> TERM[Claude terminal<br/>intent → verified candle → checked analysis]
 ```
 
-Deployment: GitHub Actions runs the tests, pushes the image to GHCR, and through AWS Systems Manager starts it in the idle slot (`app-blue` or `app-green`) on EC2; nginx switches over only after the new slot's health check passes. PostgreSQL is Amazon RDS in the same VPC without public access. Details in [deploy/README.md](deploy/README.md).
+Deployment: GitHub Actions runs the tests, pushes the image to GHCR, and, when deployment is enabled for the repository, through AWS Systems Manager starts it in the idle slot (`app-blue` or `app-green`) on EC2; nginx switches over only after the new slot's health check passes. PostgreSQL is Amazon RDS in the same VPC without public access. Details in [deploy/README.md](deploy/README.md).
 
 ## API at a glance
 
@@ -139,7 +139,7 @@ Prerequisites:
 - Local ports `8080` and `9092` free
 - Network access to Binance.US; the terminal also needs an Anthropic API key and access to `api.anthropic.com`
 
-PostgreSQL is an external dependency: the service can use Amazon RDS or any PostgreSQL you run yourself. With Amazon RDS, the RDS security group must allow inbound PostgreSQL (`5432`) from your machine's public IP. Do not open it to `0.0.0.0/0` for convenience.
+PostgreSQL is an external dependency and is not part of the Compose stack: point the application at any PostgreSQL your machine can reach, for example a local instance or a container you start yourself. An Amazon RDS instance works too, but only if it is reachable from where you run the application: a publicly accessible RDS instance needs its security group to allow inbound PostgreSQL (`5432`) from your machine's public IP (never `0.0.0.0/0`); a private RDS instance like the production one has no public endpoint, so changing its security group is not enough, and you need to run inside the VPC (as the EC2 host does) or open a tunnel, for instance Systems Manager port forwarding through the EC2 host.
 
 ### 1. Clone the repository and configure the environment
 
