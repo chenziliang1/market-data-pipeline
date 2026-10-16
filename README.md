@@ -32,23 +32,27 @@ Refreshing the rollups costs about 25% of write throughput. In exchange, a year 
 
 ## Architecture
 
+<p align="center"><img src="docs/architecture.svg" alt="Architecture: Binance.US klines go through the load API and Kafka to a batch consumer that writes minute candles and rollups to PostgreSQL in one transaction; failed records go to a dead-letter topic; the aggregate, reconciliation and Claude terminal read from PostgreSQL" width="720"></p>
+
+<details>
+<summary>Mermaid source (docs/architecture.mmd)</summary>
+
 ```mermaid
-flowchart LR
-    subgraph Ingestion
-        BZ[Binance.US<br/>1-minute klines] --> LOAD[POST /api/load<br/>X-API-Key]
-        LOAD -->|closed candles only| PROD[Kafka producer<br/>acks=all, idempotent]
-    end
-    PROD --> TOPIC[(trade-data topic)]
-    TOPIC --> CONS[Kafka consumer<br/>one multi-row upsert per poll]
-    CONS -->|same transaction| PG[(PostgreSQL<br/>minute candles + hourly/daily rollups)]
-    CONS -. failed records, with retries .-> DLT[(dead-letter topic)]
-    DLT -->|GET / POST /api/admin/dead-letters| CONS
-    PG --> AGG[GET /api/aggregates]
-    AGG <--> REDIS[(Redis cache-aside<br/>invalidated on write)]
-    PG --> REC[GET /api/reconciliation/daily]
+%%{init: {"theme": "base", "themeVariables": {"fontSize": "18px"}, "flowchart": {"nodeSpacing": 40, "rankSpacing": 50, "padding": 12}}}%%
+flowchart TB
+    BZ[Binance.US] -->|1-minute klines| LOAD[Load API + producer]
+    LOAD -->|closed candles, via Kafka| CONS[Batch consumer]
+    CONS <-. failed records / replay .-> DLT[(Dead-letter topic)]
+    CONS -->|same transaction| PG[(PostgreSQL<br/>minutes + rollups)]
+    PG --> AGG[Aggregate API<br/>Redis cache-aside]
+    PG --> REC[Reconciliation API]
+    PG --> TERM[Claude terminal]
     BZ -->|daily klines| REC
-    PG --> TERM[Claude terminal<br/>intent → verified candle → checked analysis]
 ```
+
+Regenerate the SVG with `npx -y @mermaid-js/mermaid-cli -i docs/architecture.mmd -o docs/architecture.svg -b white`.
+
+</details>
 
 Deployment: GitHub Actions runs the tests, pushes the image to GHCR, and, when deployment is enabled for the repository, through AWS Systems Manager starts it in the idle slot (`app-blue` or `app-green`) on EC2; nginx switches over only after the new slot's health check passes. PostgreSQL is Amazon RDS in the same VPC without public access. Details in [deploy/README.md](deploy/README.md).
 

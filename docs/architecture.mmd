@@ -1,0 +1,10 @@
+%%{init: {"theme": "base", "themeVariables": {"fontSize": "18px"}, "flowchart": {"nodeSpacing": 40, "rankSpacing": 50, "padding": 12}}}%%
+flowchart TB
+    BZ[Binance.US] -->|1-minute klines| LOAD[Load API + producer]
+    LOAD -->|closed candles, via Kafka| CONS[Batch consumer]
+    CONS <-. failed records / replay .-> DLT[(Dead-letter topic)]
+    CONS -->|same transaction| PG[(PostgreSQL<br/>minutes + rollups)]
+    PG --> AGG[Aggregate API<br/>Redis cache-aside]
+    PG --> REC[Reconciliation API]
+    PG --> TERM[Claude terminal]
+    BZ -->|daily klines| REC
